@@ -19,425 +19,414 @@ span.spaces    { background: white }
 <pre>
 <span class="lineno">    1 </span>{-# LANGUAGE LambdaCase #-}
 <span class="lineno">    2 </span>{-# LANGUAGE ScopedTypeVariables #-}
-<span class="lineno">    3 </span>{-# LANGUAGE TupleSections #-}
-<span class="lineno">    4 </span>{-# LANGUAGE TypeFamilies #-}
-<span class="lineno">    5 </span>
-<span class="lineno">    6 </span>-- |
-<span class="lineno">    7 </span>-- Copyright: © 2018-2020 IOHK
-<span class="lineno">    8 </span>-- License: Apache-2.0
-<span class="lineno">    9 </span>--
-<span class="lineno">   10 </span>-- This module contains an implementation of the __Random-Improve__ coin
-<span class="lineno">   11 </span>-- selection algorithm.
-<span class="lineno">   12 </span>--
-<span class="lineno">   13 </span>module Cardano.CoinSelection.Algorithm.RandomImprove
-<span class="lineno">   14 </span>    ( randomImprove
-<span class="lineno">   15 </span>    ) where
-<span class="lineno">   16 </span>
-<span class="lineno">   17 </span>import Prelude
-<span class="lineno">   18 </span>
-<span class="lineno">   19 </span>import Cardano.CoinSelection
-<span class="lineno">   20 </span>    ( CoinMap (..)
-<span class="lineno">   21 </span>    , CoinMapEntry (..)
-<span class="lineno">   22 </span>    , CoinSelection (..)
-<span class="lineno">   23 </span>    , CoinSelectionAlgorithm (..)
-<span class="lineno">   24 </span>    , CoinSelectionError (..)
-<span class="lineno">   25 </span>    , CoinSelectionLimit (..)
-<span class="lineno">   26 </span>    , CoinSelectionParameters (..)
-<span class="lineno">   27 </span>    , CoinSelectionResult (..)
-<span class="lineno">   28 </span>    , InputCountInsufficientError (..)
-<span class="lineno">   29 </span>    , InputLimitExceededError (..)
-<span class="lineno">   30 </span>    , InputValueInsufficientError (..)
-<span class="lineno">   31 </span>    , InputsExhaustedError (..)
-<span class="lineno">   32 </span>    , coinMapFromList
-<span class="lineno">   33 </span>    , coinMapRandomEntry
-<span class="lineno">   34 </span>    , coinMapToList
-<span class="lineno">   35 </span>    , coinMapValue
-<span class="lineno">   36 </span>    )
-<span class="lineno">   37 </span>import Control.Monad
-<span class="lineno">   38 </span>    ( foldM )
-<span class="lineno">   39 </span>import Control.Monad.Trans.Class
-<span class="lineno">   40 </span>    ( lift )
-<span class="lineno">   41 </span>import Control.Monad.Trans.Except
-<span class="lineno">   42 </span>    ( ExceptT (..), throwE )
-<span class="lineno">   43 </span>import Control.Monad.Trans.Maybe
-<span class="lineno">   44 </span>    ( MaybeT (..), runMaybeT )
-<span class="lineno">   45 </span>import Crypto.Random.Types
-<span class="lineno">   46 </span>    ( MonadRandom )
-<span class="lineno">   47 </span>import Data.Ord
-<span class="lineno">   48 </span>    ( Down (..) )
-<span class="lineno">   49 </span>import Internal.Coin
-<span class="lineno">   50 </span>    ( Coin )
-<span class="lineno">   51 </span>
-<span class="lineno">   52 </span>import qualified Data.List as L
-<span class="lineno">   53 </span>import qualified Internal.Coin as C
-<span class="lineno">   54 </span>
-<span class="lineno">   55 </span>-- | An implementation of the __Random-Improve__ coin selection algorithm.
-<span class="lineno">   56 </span>--
-<span class="lineno">   57 </span>-- = Overview
-<span class="lineno">   58 </span>--
-<span class="lineno">   59 </span>-- The __Random-Improve__ coin selection algorithm works in __two phases__, by
-<span class="lineno">   60 </span>-- /first/ selecting UTxO entries /at random/ to pay for each of the given
-<span class="lineno">   61 </span>-- outputs, and /then/ attempting to /improve/ upon each of the selections.
-<span class="lineno">   62 </span>--
-<span class="lineno">   63 </span>-- === Phase 1: Random Selection
-<span class="lineno">   64 </span>--
-<span class="lineno">   65 </span>-- __In this phase, the algorithm randomly selects a minimal set of UTxO__
-<span class="lineno">   66 </span>-- __entries to pay for each of the given outputs.__
-<span class="lineno">   67 </span>--
-<span class="lineno">   68 </span>-- During this phase, the algorithm:
-<span class="lineno">   69 </span>--
-<span class="lineno">   70 </span>--   *  processes outputs in /descending order of coin value/.
-<span class="lineno">   71 </span>--
-<span class="lineno">   72 </span>--   *  maintains a /remaining UTxO set/, initially equal to the given
-<span class="lineno">   73 </span>--      /UTxO set/ parameter.
-<span class="lineno">   74 </span>--
-<span class="lineno">   75 </span>-- For each output of value __/v/__, the algorithm /randomly/ selects entries
-<span class="lineno">   76 </span>-- from the /remaining UTxO set/, until the total value of selected entries is
-<span class="lineno">   77 </span>-- greater than or equal to __/v/__. The selected entries are then associated
-<span class="lineno">   78 </span>-- with that output, and removed from the /remaining UTxO set/.
-<span class="lineno">   79 </span>--
-<span class="lineno">   80 </span>-- This phase ends when every output has been associated with a selection of
-<span class="lineno">   81 </span>-- UTxO entries.
-<span class="lineno">   82 </span>--
-<span class="lineno">   83 </span>-- However, if the remaining UTxO set is completely exhausted before all
-<span class="lineno">   84 </span>-- outputs can be processed, the algorithm terminates with an error.
-<span class="lineno">   85 </span>--
-<span class="lineno">   86 </span>-- === Phase 2: Improvement
-<span class="lineno">   87 </span>--
-<span class="lineno">   88 </span>-- __In this phase, the algorithm attempts to improve upon each of the UTxO__
-<span class="lineno">   89 </span>-- __selections made in the previous phase, by conservatively expanding the__
-<span class="lineno">   90 </span>-- __selection made for each output.__
-<span class="lineno">   91 </span>--
-<span class="lineno">   92 </span>-- During this phase, the algorithm:
-<span class="lineno">   93 </span>--
-<span class="lineno">   94 </span>--   *  processes outputs in /ascending order of coin value/.
-<span class="lineno">   95 </span>--
-<span class="lineno">   96 </span>--   *  continues to maintain the /remaining UTxO set/ produced by the previous
-<span class="lineno">   97 </span>--      phase.
-<span class="lineno">   98 </span>--
-<span class="lineno">   99 </span>--   *  maintains an /accumulated coin selection/, which is initially /empty/.
-<span class="lineno">  100 </span>--
-<span class="lineno">  101 </span>-- For each output of value __/v/__, the algorithm:
-<span class="lineno">  102 </span>--
-<span class="lineno">  103 </span>--  1.  __Calculates a /target range/__ for the total value of inputs used to
-<span class="lineno">  104 </span>--      pay for that output, defined by the triplet:
-<span class="lineno">  105 </span>--
-<span class="lineno">  106 </span>--      (/minimum/, /ideal/, /maximum/) = (/v/, /2v/, /3v/)
-<span class="lineno">  107 </span>--
-<span class="lineno">  108 </span>--  2.  __Attempts to /improve/ upon the /existing UTxO selection/__ for that
-<span class="lineno">  109 </span>--      output, by repeatedly selecting additional entries at random from the
-<span class="lineno">  110 </span>--      /remaining UTxO set/, stopping when the selection can be improved upon
-<span class="lineno">  111 </span>--      no further.
-<span class="lineno">  112 </span>--
-<span class="lineno">  113 </span>--      A selection with value /v1/ is considered to be an /improvement/ over a
-<span class="lineno">  114 </span>--      selection with value /v0/ if __all__ of the following conditions are
-<span class="lineno">  115 </span>--      satisfied:
-<span class="lineno">  116 </span>--
-<span class="lineno">  117 </span>--       * __Condition 1__: we have moved closer to the /ideal/ value:
-<span class="lineno">  118 </span>--
-<span class="lineno">  119 </span>--             abs (/ideal/ − /v1/) &lt; abs (/ideal/ − /v0/)
-<span class="lineno">  120 </span>--
-<span class="lineno">  121 </span>--       * __Condition 2__: we have not exceeded the /maximum/ value:
-<span class="lineno">  122 </span>--
-<span class="lineno">  123 </span>--             /v1/ ≤ /maximum/
-<span class="lineno">  124 </span>--
-<span class="lineno">  125 </span>--       * __Condition 3__: when counting cumulatively across all outputs
-<span class="lineno">  126 </span>--       considered so far, we have not selected more than the /maximum/ number
-<span class="lineno">  127 </span>--       of UTxO entries specified by 'limit'.
-<span class="lineno">  128 </span>--
-<span class="lineno">  129 </span>--  3.  __Creates a /change value/__ for the output, equal to the total value
-<span class="lineno">  130 </span>--      of the /final UTxO selection/ for that output minus the value /v/ of
-<span class="lineno">  131 </span>--      that output.
-<span class="lineno">  132 </span>--
-<span class="lineno">  133 </span>--  4.  __Updates the /accumulated coin selection/__:
-<span class="lineno">  134 </span>--
-<span class="lineno">  135 </span>--       * Adds the /output/ to 'outputs'.
-<span class="lineno">  136 </span>--       * Adds the /improved UTxO selection/ to 'inputs'.
-<span class="lineno">  137 </span>--       * Adds the /change value/ to 'change'.
-<span class="lineno">  138 </span>--
-<span class="lineno">  139 </span>-- This phase ends when every output has been processed, __or__ when the
-<span class="lineno">  140 </span>-- /remaining UTxO set/ has been exhausted, whichever occurs sooner.
-<span class="lineno">  141 </span>--
-<span class="lineno">  142 </span>-- = Termination
-<span class="lineno">  143 </span>--
-<span class="lineno">  144 </span>-- When both phases are complete, the algorithm terminates.
-<span class="lineno">  145 </span>--
-<span class="lineno">  146 </span>-- The /accumulated coin selection/ and /remaining UTxO set/ are returned to
-<span class="lineno">  147 </span>-- the caller.
-<span class="lineno">  148 </span>--
-<span class="lineno">  149 </span>-- === Failure Modes
-<span class="lineno">  150 </span>--
-<span class="lineno">  151 </span>-- The algorithm terminates with an __error__ if:
-<span class="lineno">  152 </span>--
-<span class="lineno">  153 </span>--  1.  The /total value/ of the initial UTxO set (the amount of money
-<span class="lineno">  154 </span>--      /available/) is /less than/ the total value of the output list (the
-<span class="lineno">  155 </span>--      amount of money /required/).
-<span class="lineno">  156 </span>--
-<span class="lineno">  157 </span>--      See: __'InputValueInsufficientError'__.
-<span class="lineno">  158 </span>--
-<span class="lineno">  159 </span>--  2.  The /number/ of entries in the initial UTxO set is /smaller than/ the
-<span class="lineno">  160 </span>--      number of requested outputs.
-<span class="lineno">  161 </span>--
-<span class="lineno">  162 </span>--      Due to the nature of the algorithm, /at least one/ UTxO entry is
-<span class="lineno">  163 </span>--      required /for each/ output.
-<span class="lineno">  164 </span>--
-<span class="lineno">  165 </span>--      See: __'InputCountInsufficientError'__.
-<span class="lineno">  166 </span>--
-<span class="lineno">  167 </span>--  3.  Due to the particular /distribution/ of values within the initial UTxO
-<span class="lineno">  168 </span>--      set, the algorithm depletes all entries from the UTxO set /before/ it
-<span class="lineno">  169 </span>--      is able to pay for all requested outputs.
-<span class="lineno">  170 </span>--
-<span class="lineno">  171 </span>--      See: __'InputsExhaustedError'__.
-<span class="lineno">  172 </span>--
-<span class="lineno">  173 </span>--  4.  The /number/ of UTxO entries needed to pay for the requested outputs
-<span class="lineno">  174 </span>--      would /exceed/ the upper limit specified by 'limit'.
-<span class="lineno">  175 </span>--
-<span class="lineno">  176 </span>--      See: __'InputLimitExceededError'__.
-<span class="lineno">  177 </span>--
-<span class="lineno">  178 </span>-- = Motivating Principles
-<span class="lineno">  179 </span>--
-<span class="lineno">  180 </span>-- There are several motivating principles behind the design of the algorithm.
-<span class="lineno">  181 </span>--
-<span class="lineno">  182 </span>-- === Principle 1: Dust Management
-<span class="lineno">  183 </span>--
-<span class="lineno">  184 </span>-- The probability that random selection will choose dust entries from a UTxO
-<span class="lineno">  185 </span>-- set increases with the proportion of dust in the set.
-<span class="lineno">  186 </span>--
-<span class="lineno">  187 </span>-- Therefore, for a UTxO set with a large amount of dust, there's a high
-<span class="lineno">  188 </span>-- probability that a random subset will include a large amount of dust.
-<span class="lineno">  189 </span>--
-<span class="lineno">  190 </span>-- === Principle 2: Change Management
-<span class="lineno">  191 </span>--
-<span class="lineno">  192 </span>-- Ideally, coin selection algorithms should, over time, create a UTxO set that
-<span class="lineno">  193 </span>-- has /useful/ outputs: outputs that will allow us to process future payments
-<span class="lineno">  194 </span>-- with a minimum number of inputs.
-<span class="lineno">  195 </span>--
-<span class="lineno">  196 </span>-- If for each payment request of value __/v/__ we create a change output of
-<span class="lineno">  197 </span>-- /roughly/ the same value __/v/__, then we will end up with a distribution of
-<span class="lineno">  198 </span>-- change values that matches the typical value distribution of payment
-<span class="lineno">  199 </span>-- requests.
-<span class="lineno">  200 </span>--
-<span class="lineno">  201 </span>-- === Principle 3: Performance Management
-<span class="lineno">  202 </span>--
-<span class="lineno">  203 </span>-- Searching the UTxO set for additional entries to improve our change outputs
-<span class="lineno">  204 </span>-- is /only/ useful if the UTxO set contains entries that are sufficiently
-<span class="lineno">  205 </span>-- small enough. But it is precisely when the UTxO set contains many small
-<span class="lineno">  206 </span>-- entries that it is less likely for a randomly-chosen UTxO entry to push the
-<span class="lineno">  207 </span>-- total above the upper bound.
-<span class="lineno">  208 </span>--
-<span class="lineno">  209 </span>-- @since 1.0.0
-<span class="lineno">  210 </span>randomImprove
-<span class="lineno">  211 </span>    :: (Ord i, Ord o, MonadRandom m)
-<span class="lineno">  212 </span>    =&gt; CoinSelectionAlgorithm i o m
-<span class="lineno">  213 </span><span class="decl"><span class="istickedoff">randomImprove = CoinSelectionAlgorithm payForOutputs</span></span>
-<span class="lineno">  214 </span>
-<span class="lineno">  215 </span>payForOutputs
-<span class="lineno">  216 </span>    :: (Ord i, Ord o, MonadRandom m)
-<span class="lineno">  217 </span>    =&gt; CoinSelectionParameters i o
-<span class="lineno">  218 </span>    -&gt; ExceptT CoinSelectionError m (CoinSelectionResult i o)
-<span class="lineno">  219 </span><span class="decl"><span class="istickedoff">payForOutputs params = do</span>
-<span class="lineno">  220 </span><span class="spaces">    </span><span class="istickedoff">mRandomSelections &lt;- lift $ runMaybeT $ foldM makeRandomSelection</span>
-<span class="lineno">  221 </span><span class="spaces">        </span><span class="istickedoff">(inputCountMax, inputsAvailable params, []) outputsDescending</span>
-<span class="lineno">  222 </span><span class="spaces">    </span><span class="istickedoff">case mRandomSelections of</span>
-<span class="lineno">  223 </span><span class="spaces">        </span><span class="istickedoff">Just (inputCountRemaining, utxoRemaining, randomSelections) -&gt; do</span>
-<span class="lineno">  224 </span><span class="spaces">            </span><span class="istickedoff">(_, finalSelection, utxoRemaining') &lt;- lift $ foldM</span>
-<span class="lineno">  225 </span><span class="spaces">                </span><span class="istickedoff">improveSelection</span>
-<span class="lineno">  226 </span><span class="spaces">                    </span><span class="istickedoff">(inputCountRemaining, mempty, utxoRemaining)</span>
-<span class="lineno">  227 </span><span class="spaces">                    </span><span class="istickedoff">(reverse randomSelections)</span>
-<span class="lineno">  228 </span><span class="spaces">            </span><span class="istickedoff">pure $ CoinSelectionResult finalSelection utxoRemaining'</span>
-<span class="lineno">  229 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt;</span>
-<span class="lineno">  230 </span><span class="spaces">            </span><span class="istickedoff">throwE errorCondition</span>
-<span class="lineno">  231 </span><span class="spaces">  </span><span class="istickedoff">where</span>
-<span class="lineno">  232 </span><span class="spaces">    </span><span class="istickedoff">errorCondition</span>
-<span class="lineno">  233 </span><span class="spaces">      </span><span class="istickedoff">| amountAvailable &lt; amountRequested =</span>
-<span class="lineno">  234 </span><span class="spaces">          </span><span class="istickedoff">InputValueInsufficient $</span>
-<span class="lineno">  235 </span><span class="spaces">              </span><span class="istickedoff">InputValueInsufficientError</span>
-<span class="lineno">  236 </span><span class="spaces">                  </span><span class="istickedoff">amountAvailable amountRequested</span>
-<span class="lineno">  237 </span><span class="spaces">      </span><span class="istickedoff">| utxoCount &lt; outputCount =</span>
-<span class="lineno">  238 </span><span class="spaces">          </span><span class="istickedoff">InputCountInsufficient $</span>
-<span class="lineno">  239 </span><span class="spaces">              </span><span class="istickedoff">InputCountInsufficientError</span>
-<span class="lineno">  240 </span><span class="spaces">                  </span><span class="istickedoff">utxoCount outputCount</span>
-<span class="lineno">  241 </span><span class="spaces">      </span><span class="istickedoff">| utxoCount &lt;= fromIntegral inputCountMax =</span>
-<span class="lineno">  242 </span><span class="spaces">          </span><span class="istickedoff">InputsExhausted</span>
-<span class="lineno">  243 </span><span class="spaces">              </span><span class="istickedoff">InputsExhaustedError</span>
-<span class="lineno">  244 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
-<span class="lineno">  245 </span><span class="spaces">          </span><span class="istickedoff">InputLimitExceeded $</span>
-<span class="lineno">  246 </span><span class="spaces">              </span><span class="istickedoff">InputLimitExceededError $</span>
-<span class="lineno">  247 </span><span class="spaces">                  </span><span class="istickedoff">fromIntegral inputCountMax</span>
-<span class="lineno">  248 </span><span class="spaces">    </span><span class="istickedoff">amountAvailable =</span>
-<span class="lineno">  249 </span><span class="spaces">        </span><span class="istickedoff">coinMapValue $ inputsAvailable params</span>
-<span class="lineno">  250 </span><span class="spaces">    </span><span class="istickedoff">amountRequested =</span>
-<span class="lineno">  251 </span><span class="spaces">        </span><span class="istickedoff">coinMapValue $ outputsRequested params</span>
-<span class="lineno">  252 </span><span class="spaces">    </span><span class="istickedoff">inputCountMax =</span>
-<span class="lineno">  253 </span><span class="spaces">        </span><span class="istickedoff">fromIntegral $ calculateLimit (limit params) $ <span class="nottickedoff">fromIntegral outputCount</span></span>
-<span class="lineno">  254 </span><span class="spaces">    </span><span class="istickedoff">outputCount =</span>
-<span class="lineno">  255 </span><span class="spaces">        </span><span class="istickedoff">fromIntegral $ length $ coinMapToList $ outputsRequested params</span>
-<span class="lineno">  256 </span><span class="spaces">    </span><span class="istickedoff">outputsDescending =</span>
-<span class="lineno">  257 </span><span class="spaces">        </span><span class="istickedoff">L.sortOn (Down . entryValue) $ coinMapToList $ outputsRequested params</span>
-<span class="lineno">  258 </span><span class="spaces">    </span><span class="istickedoff">utxoCount =</span>
-<span class="lineno">  259 </span><span class="spaces">        </span><span class="istickedoff">fromIntegral $ L.length $ coinMapToList $ inputsAvailable params</span></span>
-<span class="lineno">  260 </span>
-<span class="lineno">  261 </span>-- | Randomly select entries from the given UTxO set, until the total value of
-<span class="lineno">  262 </span>--   selected entries is greater than or equal to the given output value.
-<span class="lineno">  263 </span>--
-<span class="lineno">  264 </span>-- Once a random selection has been made that meets the above criterion, this
-<span class="lineno">  265 </span>-- function returns that selection as is, making no attempt to improve upon
-<span class="lineno">  266 </span>-- the selection in any way.
-<span class="lineno">  267 </span>--
-<span class="lineno">  268 </span>makeRandomSelection
-<span class="lineno">  269 </span>    :: forall i o m . MonadRandom m
-<span class="lineno">  270 </span>    =&gt; (Integer, CoinMap i, [([CoinMapEntry i], CoinMapEntry o)])
-<span class="lineno">  271 </span>    -&gt; CoinMapEntry o
-<span class="lineno">  272 </span>    -&gt; MaybeT m (Integer, CoinMap i, [([CoinMapEntry i], CoinMapEntry o)])
-<span class="lineno">  273 </span><span class="decl"><span class="istickedoff">makeRandomSelection</span>
-<span class="lineno">  274 </span><span class="spaces">    </span><span class="istickedoff">(inputCountRemaining, utxoRemaining, existingSelections) txout = do</span>
-<span class="lineno">  275 </span><span class="spaces">        </span><span class="istickedoff">(utxoSelected, utxoRemaining') &lt;- coverRandomly ([], utxoRemaining)</span>
-<span class="lineno">  276 </span><span class="spaces">        </span><span class="istickedoff">return</span>
-<span class="lineno">  277 </span><span class="spaces">            </span><span class="istickedoff">( inputCountRemaining - fromIntegral (L.length utxoSelected)</span>
-<span class="lineno">  278 </span><span class="spaces">            </span><span class="istickedoff">, utxoRemaining'</span>
-<span class="lineno">  279 </span><span class="spaces">            </span><span class="istickedoff">, (utxoSelected, txout) : existingSelections</span>
-<span class="lineno">  280 </span><span class="spaces">            </span><span class="istickedoff">)</span>
-<span class="lineno">  281 </span><span class="spaces">  </span><span class="istickedoff">where</span>
-<span class="lineno">  282 </span><span class="spaces">    </span><span class="istickedoff">coverRandomly</span>
-<span class="lineno">  283 </span><span class="spaces">        </span><span class="istickedoff">:: ([CoinMapEntry i], CoinMap i)</span>
-<span class="lineno">  284 </span><span class="spaces">        </span><span class="istickedoff">-&gt; MaybeT m ([CoinMapEntry i], CoinMap i)</span>
-<span class="lineno">  285 </span><span class="spaces">    </span><span class="istickedoff">coverRandomly (selected, remaining)</span>
-<span class="lineno">  286 </span><span class="spaces">        </span><span class="istickedoff">| L.length selected &gt; fromIntegral inputCountRemaining =</span>
-<span class="lineno">  287 </span><span class="spaces">            </span><span class="istickedoff">MaybeT $ return Nothing</span>
-<span class="lineno">  288 </span><span class="spaces">        </span><span class="istickedoff">| sumEntries selected &gt;= targetMin (mkTargetRange txout) =</span>
-<span class="lineno">  289 </span><span class="spaces">            </span><span class="istickedoff">MaybeT $ return $ Just (selected, remaining)</span>
-<span class="lineno">  290 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
-<span class="lineno">  291 </span><span class="spaces">            </span><span class="istickedoff">utxoPickRandomT remaining &gt;&gt;= \(picked, remaining') -&gt;</span>
-<span class="lineno">  292 </span><span class="spaces">                </span><span class="istickedoff">coverRandomly (picked : selected, remaining')</span></span>
-<span class="lineno">  293 </span>
-<span class="lineno">  294 </span>-- | Perform an improvement to random selection on a given output.
-<span class="lineno">  295 </span>improveSelection
-<span class="lineno">  296 </span>    :: forall i o m . (MonadRandom m, Ord i, Ord o)
-<span class="lineno">  297 </span>    =&gt; (Integer, CoinSelection i o, CoinMap i)
-<span class="lineno">  298 </span>    -&gt; ([CoinMapEntry i], CoinMapEntry o)
-<span class="lineno">  299 </span>    -&gt; m (Integer, CoinSelection i o, CoinMap i)
-<span class="lineno">  300 </span><span class="decl"><span class="istickedoff">improveSelection (maxN0, selection, utxo0) (inps0, txout) = do</span>
-<span class="lineno">  301 </span><span class="spaces">    </span><span class="istickedoff">(maxN, inps, utxo) &lt;- improve (maxN0, inps0, utxo0)</span>
-<span class="lineno">  302 </span><span class="spaces">    </span><span class="istickedoff">return</span>
-<span class="lineno">  303 </span><span class="spaces">        </span><span class="istickedoff">( maxN</span>
-<span class="lineno">  304 </span><span class="spaces">        </span><span class="istickedoff">, selection &lt;&gt; CoinSelection</span>
-<span class="lineno">  305 </span><span class="spaces">            </span><span class="istickedoff">{ inputs = coinMapFromList inps</span>
-<span class="lineno">  306 </span><span class="spaces">            </span><span class="istickedoff">, outputs = coinMapFromList [txout]</span>
-<span class="lineno">  307 </span><span class="spaces">            </span><span class="istickedoff">, change = mkChange txout inps</span>
-<span class="lineno">  308 </span><span class="spaces">            </span><span class="istickedoff">}</span>
-<span class="lineno">  309 </span><span class="spaces">        </span><span class="istickedoff">, utxo</span>
-<span class="lineno">  310 </span><span class="spaces">        </span><span class="istickedoff">)</span>
-<span class="lineno">  311 </span><span class="spaces">  </span><span class="istickedoff">where</span>
-<span class="lineno">  312 </span><span class="spaces">    </span><span class="istickedoff">target = mkTargetRange txout</span>
-<span class="lineno">  313 </span><span class="spaces"></span><span class="istickedoff"></span>
-<span class="lineno">  314 </span><span class="spaces">    </span><span class="istickedoff">improve</span>
-<span class="lineno">  315 </span><span class="spaces">        </span><span class="istickedoff">:: (Integer, [CoinMapEntry i], CoinMap i)</span>
-<span class="lineno">  316 </span><span class="spaces">        </span><span class="istickedoff">-&gt; m (Integer, [CoinMapEntry i], CoinMap i)</span>
-<span class="lineno">  317 </span><span class="spaces">    </span><span class="istickedoff">improve (maxN, inps, utxo)</span>
-<span class="lineno">  318 </span><span class="spaces">        </span><span class="istickedoff">| maxN &gt;= 1 &amp;&amp; sumEntries inps &lt; targetAim target = do</span>
-<span class="lineno">  319 </span><span class="spaces">            </span><span class="istickedoff">runMaybeT (utxoPickRandomT utxo) &gt;&gt;= \case</span>
-<span class="lineno">  320 </span><span class="spaces">                </span><span class="istickedoff">Nothing -&gt;</span>
-<span class="lineno">  321 </span><span class="spaces">                    </span><span class="istickedoff">return (maxN, inps, utxo)</span>
-<span class="lineno">  322 </span><span class="spaces">                </span><span class="istickedoff">Just (io, utxo') | isImprovement io inps -&gt; do</span>
-<span class="lineno">  323 </span><span class="spaces">                    </span><span class="istickedoff">let inps' = io : inps</span>
-<span class="lineno">  324 </span><span class="spaces">                    </span><span class="istickedoff">let maxN' = maxN - 1</span>
-<span class="lineno">  325 </span><span class="spaces">                    </span><span class="istickedoff">improve (maxN', inps', utxo')</span>
-<span class="lineno">  326 </span><span class="spaces">                </span><span class="istickedoff">Just _ -&gt;</span>
-<span class="lineno">  327 </span><span class="spaces">                    </span><span class="istickedoff">return (maxN, inps, utxo)</span>
-<span class="lineno">  328 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
-<span class="lineno">  329 </span><span class="spaces">            </span><span class="istickedoff">return (maxN, inps, utxo)</span>
-<span class="lineno">  330 </span><span class="spaces"></span><span class="istickedoff"></span>
-<span class="lineno">  331 </span><span class="spaces">    </span><span class="istickedoff">isImprovement :: CoinMapEntry i -&gt; [CoinMapEntry i] -&gt; Bool</span>
-<span class="lineno">  332 </span><span class="spaces">    </span><span class="istickedoff">isImprovement io selected =</span>
-<span class="lineno">  333 </span><span class="spaces">        </span><span class="istickedoff">let</span>
-<span class="lineno">  334 </span><span class="spaces">            </span><span class="istickedoff">condA = -- (a) It doesn’t exceed a specified upper limit.</span>
-<span class="lineno">  335 </span><span class="spaces">                </span><span class="istickedoff">sumEntries (io : selected) &lt; targetMax target</span>
-<span class="lineno">  336 </span><span class="spaces"></span><span class="istickedoff"></span>
-<span class="lineno">  337 </span><span class="spaces">            </span><span class="istickedoff">condB = -- (b) Addition gets us closer to the ideal change</span>
-<span class="lineno">  338 </span><span class="spaces">                </span><span class="istickedoff">distanceA &lt; distanceB</span>
-<span class="lineno">  339 </span><span class="spaces">              </span><span class="istickedoff">where</span>
-<span class="lineno">  340 </span><span class="spaces">                </span><span class="istickedoff">distanceA = C.distance</span>
-<span class="lineno">  341 </span><span class="spaces">                    </span><span class="istickedoff">(targetAim target)</span>
-<span class="lineno">  342 </span><span class="spaces">                    </span><span class="istickedoff">(sumEntries (io : selected))</span>
-<span class="lineno">  343 </span><span class="spaces">                </span><span class="istickedoff">distanceB = C.distance</span>
-<span class="lineno">  344 </span><span class="spaces">                    </span><span class="istickedoff">(targetAim target)</span>
-<span class="lineno">  345 </span><span class="spaces">                    </span><span class="istickedoff">(sumEntries selected)</span>
-<span class="lineno">  346 </span><span class="spaces"></span><span class="istickedoff"></span>
-<span class="lineno">  347 </span><span class="spaces">            </span><span class="istickedoff">-- (c) Doesn't exceed maximum number of inputs</span>
-<span class="lineno">  348 </span><span class="spaces">            </span><span class="istickedoff">-- Guaranteed by the precondition on 'improve'.</span>
-<span class="lineno">  349 </span><span class="spaces">        </span><span class="istickedoff">in</span>
-<span class="lineno">  350 </span><span class="spaces">            </span><span class="istickedoff">condA &amp;&amp; condB</span></span>
-<span class="lineno">  351 </span>
-<span class="lineno">  352 </span>--------------------------------------------------------------------------------
-<span class="lineno">  353 </span>-- Internals
-<span class="lineno">  354 </span>--------------------------------------------------------------------------------
-<span class="lineno">  355 </span>
-<span class="lineno">  356 </span>-- | Represents a target range of /total input values/ for a given output.
-<span class="lineno">  357 </span>--
-<span class="lineno">  358 </span>-- In this context, /total input value/ refers to the total value of a set of
-<span class="lineno">  359 </span>-- inputs selected to pay for a given output.
-<span class="lineno">  360 </span>--
-<span class="lineno">  361 </span>data TargetRange = TargetRange
-<span class="lineno">  362 </span>    { <span class="istickedoff"><span class="decl"><span class="istickedoff">targetMin</span></span></span> :: Coin
-<span class="lineno">  363 </span>        -- ^ The minimum value, corresponding to exactly the requested target
-<span class="lineno">  364 </span>        -- amount, and a change amount of zero.
-<span class="lineno">  365 </span>    , <span class="istickedoff"><span class="decl"><span class="istickedoff">targetAim</span></span></span> :: Coin
-<span class="lineno">  366 </span>        -- ^ The ideal value, corresponding to exactly twice the requested
-<span class="lineno">  367 </span>        -- target amount, and a change amount equal to the requested amount.
-<span class="lineno">  368 </span>    , <span class="istickedoff"><span class="decl"><span class="istickedoff">targetMax</span></span></span> :: Coin
-<span class="lineno">  369 </span>        -- ^ The maximum value, corresponding to exactly three times the
-<span class="lineno">  370 </span>        -- requested amount, and a change amount equal to twice the requested
-<span class="lineno">  371 </span>        -- amount.
-<span class="lineno">  372 </span>    }
-<span class="lineno">  373 </span>
-<span class="lineno">  374 </span>-- | Compute the target range of /total input values/ for a given output.
-<span class="lineno">  375 </span>--
-<span class="lineno">  376 </span>-- See 'TargetRange'.
-<span class="lineno">  377 </span>--
-<span class="lineno">  378 </span>mkTargetRange :: CoinMapEntry o -&gt; TargetRange
-<span class="lineno">  379 </span><span class="decl"><span class="istickedoff">mkTargetRange (CoinMapEntry _ c) = TargetRange</span>
-<span class="lineno">  380 </span><span class="spaces">    </span><span class="istickedoff">{ targetMin = c</span>
-<span class="lineno">  381 </span><span class="spaces">    </span><span class="istickedoff">, targetAim = c `C.add` c</span>
-<span class="lineno">  382 </span><span class="spaces">    </span><span class="istickedoff">, targetMax = c `C.add` c `C.add` c</span>
-<span class="lineno">  383 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
-<span class="lineno">  384 </span>
-<span class="lineno">  385 </span>-- | Re-wrap 'utxoPickRandom' in a 'MaybeT' monad
-<span class="lineno">  386 </span>utxoPickRandomT
-<span class="lineno">  387 </span>    :: MonadRandom m
-<span class="lineno">  388 </span>    =&gt; CoinMap i
-<span class="lineno">  389 </span>    -&gt; MaybeT m (CoinMapEntry i, CoinMap i)
-<span class="lineno">  390 </span><span class="decl"><span class="istickedoff">utxoPickRandomT =</span>
-<span class="lineno">  391 </span><span class="spaces">    </span><span class="istickedoff">MaybeT</span>
-<span class="lineno">  392 </span><span class="spaces">        </span><span class="istickedoff">. fmap (\(mi, u) -&gt; (, u) &lt;$&gt; mi)</span>
-<span class="lineno">  393 </span><span class="spaces">        </span><span class="istickedoff">. coinMapRandomEntry</span></span>
-<span class="lineno">  394 </span>
-<span class="lineno">  395 </span>-- | Compute change outputs from a target output and a selection of inputs.
-<span class="lineno">  396 </span>--
-<span class="lineno">  397 </span>-- Pre-condition:
-<span class="lineno">  398 </span>--
-<span class="lineno">  399 </span>-- The output must be less than (or equal to) the sum of the inputs.
-<span class="lineno">  400 </span>--
-<span class="lineno">  401 </span>mkChange :: CoinMapEntry o -&gt; [CoinMapEntry i] -&gt; [Coin]
-<span class="lineno">  402 </span><span class="decl"><span class="istickedoff">mkChange (CoinMapEntry _ out) inps =</span>
-<span class="lineno">  403 </span><span class="spaces">    </span><span class="istickedoff">case difference of</span>
-<span class="lineno">  404 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt;</span>
-<span class="lineno">  405 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">error $ mconcat</span></span>
-<span class="lineno">  406 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">[ &quot;mkChange: &quot;</span></span>
-<span class="lineno">  407 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">, &quot;output must be less than or equal to sum of inputs&quot;</span></span>
-<span class="lineno">  408 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
-<span class="lineno">  409 </span><span class="spaces">        </span><span class="istickedoff">Just d | C.isZero d -&gt;</span>
-<span class="lineno">  410 </span><span class="spaces">            </span><span class="istickedoff">[]</span>
-<span class="lineno">  411 </span><span class="spaces">        </span><span class="istickedoff">Just d -&gt;</span>
-<span class="lineno">  412 </span><span class="spaces">            </span><span class="istickedoff">[d]</span>
-<span class="lineno">  413 </span><span class="spaces">  </span><span class="istickedoff">where</span>
-<span class="lineno">  414 </span><span class="spaces">    </span><span class="istickedoff">difference = sumEntries inps `C.sub` out</span></span>
-<span class="lineno">  415 </span>
-<span class="lineno">  416 </span>--------------------------------------------------------------------------------
-<span class="lineno">  417 </span>-- Utilities
-<span class="lineno">  418 </span>--------------------------------------------------------------------------------
-<span class="lineno">  419 </span>
-<span class="lineno">  420 </span>sumEntries :: [CoinMapEntry i] -&gt; Coin
-<span class="lineno">  421 </span><span class="decl"><span class="istickedoff">sumEntries = mconcat . fmap entryValue</span></span>
+<span class="lineno">    3 </span>{-# LANGUAGE TypeFamilies #-}
+<span class="lineno">    4 </span>
+<span class="lineno">    5 </span>-- |
+<span class="lineno">    6 </span>-- Copyright: © 2018-2020 IOHK
+<span class="lineno">    7 </span>-- License: Apache-2.0
+<span class="lineno">    8 </span>--
+<span class="lineno">    9 </span>-- This module contains an implementation of the __Random-Improve__ coin
+<span class="lineno">   10 </span>-- selection algorithm.
+<span class="lineno">   11 </span>--
+<span class="lineno">   12 </span>module Cardano.CoinSelection.Algorithm.RandomImprove
+<span class="lineno">   13 </span>    ( randomImprove
+<span class="lineno">   14 </span>    ) where
+<span class="lineno">   15 </span>
+<span class="lineno">   16 </span>import Prelude
+<span class="lineno">   17 </span>
+<span class="lineno">   18 </span>import Cardano.CoinSelection
+<span class="lineno">   19 </span>    ( CoinMap (..)
+<span class="lineno">   20 </span>    , CoinMapEntry (..)
+<span class="lineno">   21 </span>    , CoinSelection (..)
+<span class="lineno">   22 </span>    , CoinSelectionAlgorithm (..)
+<span class="lineno">   23 </span>    , CoinSelectionError (..)
+<span class="lineno">   24 </span>    , CoinSelectionLimit (..)
+<span class="lineno">   25 </span>    , CoinSelectionParameters (..)
+<span class="lineno">   26 </span>    , CoinSelectionResult (..)
+<span class="lineno">   27 </span>    , InputCountInsufficientError (..)
+<span class="lineno">   28 </span>    , InputLimitExceededError (..)
+<span class="lineno">   29 </span>    , InputValueInsufficientError (..)
+<span class="lineno">   30 </span>    , InputsExhaustedError (..)
+<span class="lineno">   31 </span>    , coinMapFromList
+<span class="lineno">   32 </span>    , coinMapRandomEntry
+<span class="lineno">   33 </span>    , coinMapToList
+<span class="lineno">   34 </span>    , coinMapValue
+<span class="lineno">   35 </span>    )
+<span class="lineno">   36 </span>import Control.Monad
+<span class="lineno">   37 </span>    ( foldM )
+<span class="lineno">   38 </span>import Control.Monad.Trans.Class
+<span class="lineno">   39 </span>    ( lift )
+<span class="lineno">   40 </span>import Control.Monad.Trans.Except
+<span class="lineno">   41 </span>    ( ExceptT (..), throwE )
+<span class="lineno">   42 </span>import Control.Monad.Trans.Maybe
+<span class="lineno">   43 </span>    ( MaybeT (..), runMaybeT )
+<span class="lineno">   44 </span>import Crypto.Random.Types
+<span class="lineno">   45 </span>    ( MonadRandom )
+<span class="lineno">   46 </span>import Data.Ord
+<span class="lineno">   47 </span>    ( Down (..) )
+<span class="lineno">   48 </span>import Internal.Coin
+<span class="lineno">   49 </span>    ( Coin )
+<span class="lineno">   50 </span>
+<span class="lineno">   51 </span>import qualified Data.List as L
+<span class="lineno">   52 </span>import qualified Internal.Coin as C
+<span class="lineno">   53 </span>
+<span class="lineno">   54 </span>-- | An implementation of the __Random-Improve__ coin selection algorithm.
+<span class="lineno">   55 </span>--
+<span class="lineno">   56 </span>-- = Overview
+<span class="lineno">   57 </span>--
+<span class="lineno">   58 </span>-- The __Random-Improve__ coin selection algorithm works in __two phases__, by
+<span class="lineno">   59 </span>-- /first/ selecting UTxO entries /at random/ to pay for each of the given
+<span class="lineno">   60 </span>-- outputs, and /then/ attempting to /improve/ upon each of the selections.
+<span class="lineno">   61 </span>--
+<span class="lineno">   62 </span>-- === Phase 1: Random Selection
+<span class="lineno">   63 </span>--
+<span class="lineno">   64 </span>-- __In this phase, the algorithm randomly selects a minimal set of UTxO__
+<span class="lineno">   65 </span>-- __entries to pay for each of the given outputs.__
+<span class="lineno">   66 </span>--
+<span class="lineno">   67 </span>-- During this phase, the algorithm:
+<span class="lineno">   68 </span>--
+<span class="lineno">   69 </span>--   *  processes outputs in /descending order of coin value/.
+<span class="lineno">   70 </span>--
+<span class="lineno">   71 </span>--   *  maintains a /remaining UTxO set/, initially equal to the given
+<span class="lineno">   72 </span>--      /UTxO set/ parameter.
+<span class="lineno">   73 </span>--
+<span class="lineno">   74 </span>-- For each output of value __/v/__, the algorithm /randomly/ selects entries
+<span class="lineno">   75 </span>-- from the /remaining UTxO set/, until the total value of selected entries is
+<span class="lineno">   76 </span>-- greater than or equal to __/v/__. The selected entries are then associated
+<span class="lineno">   77 </span>-- with that output, and removed from the /remaining UTxO set/.
+<span class="lineno">   78 </span>--
+<span class="lineno">   79 </span>-- This phase ends when every output has been associated with a selection of
+<span class="lineno">   80 </span>-- UTxO entries.
+<span class="lineno">   81 </span>--
+<span class="lineno">   82 </span>-- However, if the remaining UTxO set is completely exhausted before all
+<span class="lineno">   83 </span>-- outputs can be processed, the algorithm terminates with an error.
+<span class="lineno">   84 </span>--
+<span class="lineno">   85 </span>-- === Phase 2: Improvement
+<span class="lineno">   86 </span>--
+<span class="lineno">   87 </span>-- __In this phase, the algorithm attempts to improve upon each of the UTxO__
+<span class="lineno">   88 </span>-- __selections made in the previous phase, by conservatively expanding the__
+<span class="lineno">   89 </span>-- __selection made for each output.__
+<span class="lineno">   90 </span>--
+<span class="lineno">   91 </span>-- During this phase, the algorithm:
+<span class="lineno">   92 </span>--
+<span class="lineno">   93 </span>--   *  processes outputs in /ascending order of coin value/.
+<span class="lineno">   94 </span>--
+<span class="lineno">   95 </span>--   *  continues to maintain the /remaining UTxO set/ produced by the previous
+<span class="lineno">   96 </span>--      phase.
+<span class="lineno">   97 </span>--
+<span class="lineno">   98 </span>--   *  maintains an /accumulated coin selection/, which is initially /empty/.
+<span class="lineno">   99 </span>--
+<span class="lineno">  100 </span>-- For each output of value __/v/__, the algorithm:
+<span class="lineno">  101 </span>--
+<span class="lineno">  102 </span>--  1.  __Calculates a /target range/__ for the total value of inputs used to
+<span class="lineno">  103 </span>--      pay for that output, defined by the triplet:
+<span class="lineno">  104 </span>--
+<span class="lineno">  105 </span>--      (/minimum/, /ideal/, /maximum/) = (/v/, /2v/, /3v/)
+<span class="lineno">  106 </span>--
+<span class="lineno">  107 </span>--  2.  __Attempts to /improve/ upon the /existing UTxO selection/__ for that
+<span class="lineno">  108 </span>--      output, by repeatedly selecting additional entries at random from the
+<span class="lineno">  109 </span>--      /remaining UTxO set/, stopping when the selection can be improved upon
+<span class="lineno">  110 </span>--      no further.
+<span class="lineno">  111 </span>--
+<span class="lineno">  112 </span>--      A selection with value /v1/ is considered to be an /improvement/ over a
+<span class="lineno">  113 </span>--      selection with value /v0/ if __all__ of the following conditions are
+<span class="lineno">  114 </span>--      satisfied:
+<span class="lineno">  115 </span>--
+<span class="lineno">  116 </span>--       * __Condition 1__: we have moved closer to the /ideal/ value:
+<span class="lineno">  117 </span>--
+<span class="lineno">  118 </span>--             abs (/ideal/ − /v1/) &lt; abs (/ideal/ − /v0/)
+<span class="lineno">  119 </span>--
+<span class="lineno">  120 </span>--       * __Condition 2__: we have not exceeded the /maximum/ value:
+<span class="lineno">  121 </span>--
+<span class="lineno">  122 </span>--             /v1/ ≤ /maximum/
+<span class="lineno">  123 </span>--
+<span class="lineno">  124 </span>--       * __Condition 3__: when counting cumulatively across all outputs
+<span class="lineno">  125 </span>--       considered so far, we have not selected more than the /maximum/ number
+<span class="lineno">  126 </span>--       of UTxO entries specified by 'limit'.
+<span class="lineno">  127 </span>--
+<span class="lineno">  128 </span>--  3.  __Creates a /change value/__ for the output, equal to the total value
+<span class="lineno">  129 </span>--      of the /final UTxO selection/ for that output minus the value /v/ of
+<span class="lineno">  130 </span>--      that output.
+<span class="lineno">  131 </span>--
+<span class="lineno">  132 </span>--  4.  __Updates the /accumulated coin selection/__:
+<span class="lineno">  133 </span>--
+<span class="lineno">  134 </span>--       * Adds the /output/ to 'outputs'.
+<span class="lineno">  135 </span>--       * Adds the /improved UTxO selection/ to 'inputs'.
+<span class="lineno">  136 </span>--       * Adds the /change value/ to 'change'.
+<span class="lineno">  137 </span>--
+<span class="lineno">  138 </span>-- This phase ends when every output has been processed, __or__ when the
+<span class="lineno">  139 </span>-- /remaining UTxO set/ has been exhausted, whichever occurs sooner.
+<span class="lineno">  140 </span>--
+<span class="lineno">  141 </span>-- = Termination
+<span class="lineno">  142 </span>--
+<span class="lineno">  143 </span>-- When both phases are complete, the algorithm terminates.
+<span class="lineno">  144 </span>--
+<span class="lineno">  145 </span>-- The /accumulated coin selection/ and /remaining UTxO set/ are returned to
+<span class="lineno">  146 </span>-- the caller.
+<span class="lineno">  147 </span>--
+<span class="lineno">  148 </span>-- === Failure Modes
+<span class="lineno">  149 </span>--
+<span class="lineno">  150 </span>-- The algorithm terminates with an __error__ if:
+<span class="lineno">  151 </span>--
+<span class="lineno">  152 </span>--  1.  The /total value/ of the initial UTxO set (the amount of money
+<span class="lineno">  153 </span>--      /available/) is /less than/ the total value of the output list (the
+<span class="lineno">  154 </span>--      amount of money /required/).
+<span class="lineno">  155 </span>--
+<span class="lineno">  156 </span>--      See: __'InputValueInsufficientError'__.
+<span class="lineno">  157 </span>--
+<span class="lineno">  158 </span>--  2.  The /number/ of entries in the initial UTxO set is /smaller than/ the
+<span class="lineno">  159 </span>--      number of requested outputs.
+<span class="lineno">  160 </span>--
+<span class="lineno">  161 </span>--      Due to the nature of the algorithm, /at least one/ UTxO entry is
+<span class="lineno">  162 </span>--      required /for each/ output.
+<span class="lineno">  163 </span>--
+<span class="lineno">  164 </span>--      See: __'InputCountInsufficientError'__.
+<span class="lineno">  165 </span>--
+<span class="lineno">  166 </span>--  3.  Due to the particular /distribution/ of values within the initial UTxO
+<span class="lineno">  167 </span>--      set, the algorithm depletes all entries from the UTxO set /before/ it
+<span class="lineno">  168 </span>--      is able to pay for all requested outputs.
+<span class="lineno">  169 </span>--
+<span class="lineno">  170 </span>--      See: __'InputsExhaustedError'__.
+<span class="lineno">  171 </span>--
+<span class="lineno">  172 </span>--  4.  The /number/ of UTxO entries needed to pay for the requested outputs
+<span class="lineno">  173 </span>--      would /exceed/ the upper limit specified by 'limit'.
+<span class="lineno">  174 </span>--
+<span class="lineno">  175 </span>--      See: __'InputLimitExceededError'__.
+<span class="lineno">  176 </span>--
+<span class="lineno">  177 </span>-- = Motivating Principles
+<span class="lineno">  178 </span>--
+<span class="lineno">  179 </span>-- There are several motivating principles behind the design of the algorithm.
+<span class="lineno">  180 </span>--
+<span class="lineno">  181 </span>-- === Principle 1: Dust Management
+<span class="lineno">  182 </span>--
+<span class="lineno">  183 </span>-- The probability that random selection will choose dust entries from a UTxO
+<span class="lineno">  184 </span>-- set increases with the proportion of dust in the set.
+<span class="lineno">  185 </span>--
+<span class="lineno">  186 </span>-- Therefore, for a UTxO set with a large amount of dust, there's a high
+<span class="lineno">  187 </span>-- probability that a random subset will include a large amount of dust.
+<span class="lineno">  188 </span>--
+<span class="lineno">  189 </span>-- === Principle 2: Change Management
+<span class="lineno">  190 </span>--
+<span class="lineno">  191 </span>-- Ideally, coin selection algorithms should, over time, create a UTxO set that
+<span class="lineno">  192 </span>-- has /useful/ outputs: outputs that will allow us to process future payments
+<span class="lineno">  193 </span>-- with a minimum number of inputs.
+<span class="lineno">  194 </span>--
+<span class="lineno">  195 </span>-- If for each payment request of value __/v/__ we create a change output of
+<span class="lineno">  196 </span>-- /roughly/ the same value __/v/__, then we will end up with a distribution of
+<span class="lineno">  197 </span>-- change values that matches the typical value distribution of payment
+<span class="lineno">  198 </span>-- requests.
+<span class="lineno">  199 </span>--
+<span class="lineno">  200 </span>-- === Principle 3: Performance Management
+<span class="lineno">  201 </span>--
+<span class="lineno">  202 </span>-- Searching the UTxO set for additional entries to improve our change outputs
+<span class="lineno">  203 </span>-- is /only/ useful if the UTxO set contains entries that are sufficiently
+<span class="lineno">  204 </span>-- small enough. But it is precisely when the UTxO set contains many small
+<span class="lineno">  205 </span>-- entries that it is less likely for a randomly-chosen UTxO entry to push the
+<span class="lineno">  206 </span>-- total above the upper bound.
+<span class="lineno">  207 </span>--
+<span class="lineno">  208 </span>-- @since 1.0.0
+<span class="lineno">  209 </span>randomImprove
+<span class="lineno">  210 </span>    :: (Ord i, Ord o, MonadRandom m)
+<span class="lineno">  211 </span>    =&gt; CoinSelectionAlgorithm i o m
+<span class="lineno">  212 </span><span class="decl"><span class="istickedoff">randomImprove = CoinSelectionAlgorithm payForOutputs</span></span>
+<span class="lineno">  213 </span>
+<span class="lineno">  214 </span>payForOutputs
+<span class="lineno">  215 </span>    :: (Ord i, Ord o, MonadRandom m)
+<span class="lineno">  216 </span>    =&gt; CoinSelectionParameters i o
+<span class="lineno">  217 </span>    -&gt; ExceptT CoinSelectionError m (CoinSelectionResult i o)
+<span class="lineno">  218 </span><span class="decl"><span class="istickedoff">payForOutputs params = do</span>
+<span class="lineno">  219 </span><span class="spaces">    </span><span class="istickedoff">mRandomSelections &lt;- lift $ runMaybeT $ foldM makeRandomSelection</span>
+<span class="lineno">  220 </span><span class="spaces">        </span><span class="istickedoff">(inputCountMax, inputsAvailable params, []) outputsDescending</span>
+<span class="lineno">  221 </span><span class="spaces">    </span><span class="istickedoff">case mRandomSelections of</span>
+<span class="lineno">  222 </span><span class="spaces">        </span><span class="istickedoff">Just (inputCountRemaining, utxoRemaining, randomSelections) -&gt; do</span>
+<span class="lineno">  223 </span><span class="spaces">            </span><span class="istickedoff">(_, finalSelection, utxoRemaining') &lt;- lift $ foldM</span>
+<span class="lineno">  224 </span><span class="spaces">                </span><span class="istickedoff">improveSelection</span>
+<span class="lineno">  225 </span><span class="spaces">                    </span><span class="istickedoff">(inputCountRemaining, mempty, utxoRemaining)</span>
+<span class="lineno">  226 </span><span class="spaces">                    </span><span class="istickedoff">(reverse randomSelections)</span>
+<span class="lineno">  227 </span><span class="spaces">            </span><span class="istickedoff">pure $ CoinSelectionResult finalSelection utxoRemaining'</span>
+<span class="lineno">  228 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt;</span>
+<span class="lineno">  229 </span><span class="spaces">            </span><span class="istickedoff">throwE errorCondition</span>
+<span class="lineno">  230 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  231 </span><span class="spaces">    </span><span class="istickedoff">errorCondition</span>
+<span class="lineno">  232 </span><span class="spaces">      </span><span class="istickedoff">| amountAvailable &lt; amountRequested =</span>
+<span class="lineno">  233 </span><span class="spaces">          </span><span class="istickedoff">InputValueInsufficient $</span>
+<span class="lineno">  234 </span><span class="spaces">              </span><span class="istickedoff">InputValueInsufficientError</span>
+<span class="lineno">  235 </span><span class="spaces">                  </span><span class="istickedoff">amountAvailable amountRequested</span>
+<span class="lineno">  236 </span><span class="spaces">      </span><span class="istickedoff">| utxoCount &lt; outputCount =</span>
+<span class="lineno">  237 </span><span class="spaces">          </span><span class="istickedoff">InputCountInsufficient $</span>
+<span class="lineno">  238 </span><span class="spaces">              </span><span class="istickedoff">InputCountInsufficientError</span>
+<span class="lineno">  239 </span><span class="spaces">                  </span><span class="istickedoff">utxoCount outputCount</span>
+<span class="lineno">  240 </span><span class="spaces">      </span><span class="istickedoff">| utxoCount &lt;= fromIntegral inputCountMax =</span>
+<span class="lineno">  241 </span><span class="spaces">          </span><span class="istickedoff">InputsExhausted</span>
+<span class="lineno">  242 </span><span class="spaces">              </span><span class="istickedoff">InputsExhaustedError</span>
+<span class="lineno">  243 </span><span class="spaces">      </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">  244 </span><span class="spaces">          </span><span class="istickedoff">InputLimitExceeded $</span>
+<span class="lineno">  245 </span><span class="spaces">              </span><span class="istickedoff">InputLimitExceededError $</span>
+<span class="lineno">  246 </span><span class="spaces">                  </span><span class="istickedoff">fromIntegral inputCountMax</span>
+<span class="lineno">  247 </span><span class="spaces">    </span><span class="istickedoff">amountAvailable =</span>
+<span class="lineno">  248 </span><span class="spaces">        </span><span class="istickedoff">coinMapValue $ inputsAvailable params</span>
+<span class="lineno">  249 </span><span class="spaces">    </span><span class="istickedoff">amountRequested =</span>
+<span class="lineno">  250 </span><span class="spaces">        </span><span class="istickedoff">coinMapValue $ outputsRequested params</span>
+<span class="lineno">  251 </span><span class="spaces">    </span><span class="istickedoff">inputCountMax =</span>
+<span class="lineno">  252 </span><span class="spaces">        </span><span class="istickedoff">fromIntegral $ calculateLimit (limit params) $ <span class="nottickedoff">fromIntegral outputCount</span></span>
+<span class="lineno">  253 </span><span class="spaces">    </span><span class="istickedoff">outputCount =</span>
+<span class="lineno">  254 </span><span class="spaces">        </span><span class="istickedoff">fromIntegral $ length $ coinMapToList $ outputsRequested params</span>
+<span class="lineno">  255 </span><span class="spaces">    </span><span class="istickedoff">outputsDescending =</span>
+<span class="lineno">  256 </span><span class="spaces">        </span><span class="istickedoff">L.sortOn (Down . entryValue) $ coinMapToList $ outputsRequested params</span>
+<span class="lineno">  257 </span><span class="spaces">    </span><span class="istickedoff">utxoCount =</span>
+<span class="lineno">  258 </span><span class="spaces">        </span><span class="istickedoff">fromIntegral $ L.length $ coinMapToList $ inputsAvailable params</span></span>
+<span class="lineno">  259 </span>
+<span class="lineno">  260 </span>-- | Randomly select entries from the given UTxO set, until the total value of
+<span class="lineno">  261 </span>--   selected entries is greater than or equal to the given output value.
+<span class="lineno">  262 </span>--
+<span class="lineno">  263 </span>-- Once a random selection has been made that meets the above criterion, this
+<span class="lineno">  264 </span>-- function returns that selection as is, making no attempt to improve upon
+<span class="lineno">  265 </span>-- the selection in any way.
+<span class="lineno">  266 </span>--
+<span class="lineno">  267 </span>makeRandomSelection
+<span class="lineno">  268 </span>    :: forall i o m . MonadRandom m
+<span class="lineno">  269 </span>    =&gt; (Integer, CoinMap i, [([CoinMapEntry i], CoinMapEntry o)])
+<span class="lineno">  270 </span>    -&gt; CoinMapEntry o
+<span class="lineno">  271 </span>    -&gt; MaybeT m (Integer, CoinMap i, [([CoinMapEntry i], CoinMapEntry o)])
+<span class="lineno">  272 </span><span class="decl"><span class="istickedoff">makeRandomSelection</span>
+<span class="lineno">  273 </span><span class="spaces">    </span><span class="istickedoff">(inputCountRemaining, utxoRemaining, existingSelections) txout = do</span>
+<span class="lineno">  274 </span><span class="spaces">        </span><span class="istickedoff">(utxoSelected, utxoRemaining') &lt;- coverRandomly ([], utxoRemaining)</span>
+<span class="lineno">  275 </span><span class="spaces">        </span><span class="istickedoff">return</span>
+<span class="lineno">  276 </span><span class="spaces">            </span><span class="istickedoff">( inputCountRemaining - fromIntegral (L.length utxoSelected)</span>
+<span class="lineno">  277 </span><span class="spaces">            </span><span class="istickedoff">, utxoRemaining'</span>
+<span class="lineno">  278 </span><span class="spaces">            </span><span class="istickedoff">, (utxoSelected, txout) : existingSelections</span>
+<span class="lineno">  279 </span><span class="spaces">            </span><span class="istickedoff">)</span>
+<span class="lineno">  280 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  281 </span><span class="spaces">    </span><span class="istickedoff">coverRandomly</span>
+<span class="lineno">  282 </span><span class="spaces">        </span><span class="istickedoff">:: ([CoinMapEntry i], CoinMap i)</span>
+<span class="lineno">  283 </span><span class="spaces">        </span><span class="istickedoff">-&gt; MaybeT m ([CoinMapEntry i], CoinMap i)</span>
+<span class="lineno">  284 </span><span class="spaces">    </span><span class="istickedoff">coverRandomly (selected, remaining)</span>
+<span class="lineno">  285 </span><span class="spaces">        </span><span class="istickedoff">| L.length selected &gt; fromIntegral inputCountRemaining =</span>
+<span class="lineno">  286 </span><span class="spaces">            </span><span class="istickedoff">MaybeT $ return Nothing</span>
+<span class="lineno">  287 </span><span class="spaces">        </span><span class="istickedoff">| sumEntries selected &gt;= targetMin (mkTargetRange txout) =</span>
+<span class="lineno">  288 </span><span class="spaces">            </span><span class="istickedoff">MaybeT $ return $ Just (selected, remaining)</span>
+<span class="lineno">  289 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">  290 </span><span class="spaces">            </span><span class="istickedoff">MaybeT (coinMapRandomEntry remaining) &gt;&gt;= \(picked, remaining') -&gt;</span>
+<span class="lineno">  291 </span><span class="spaces">                </span><span class="istickedoff">coverRandomly (picked : selected, remaining')</span></span>
+<span class="lineno">  292 </span>
+<span class="lineno">  293 </span>-- | Perform an improvement to random selection on a given output.
+<span class="lineno">  294 </span>improveSelection
+<span class="lineno">  295 </span>    :: forall i o m . (MonadRandom m, Ord i, Ord o)
+<span class="lineno">  296 </span>    =&gt; (Integer, CoinSelection i o, CoinMap i)
+<span class="lineno">  297 </span>    -&gt; ([CoinMapEntry i], CoinMapEntry o)
+<span class="lineno">  298 </span>    -&gt; m (Integer, CoinSelection i o, CoinMap i)
+<span class="lineno">  299 </span><span class="decl"><span class="istickedoff">improveSelection (maxN0, selection, utxo0) (inps0, txout) = do</span>
+<span class="lineno">  300 </span><span class="spaces">    </span><span class="istickedoff">(maxN, inps, utxo) &lt;- improve (maxN0, inps0, utxo0)</span>
+<span class="lineno">  301 </span><span class="spaces">    </span><span class="istickedoff">return</span>
+<span class="lineno">  302 </span><span class="spaces">        </span><span class="istickedoff">( maxN</span>
+<span class="lineno">  303 </span><span class="spaces">        </span><span class="istickedoff">, selection &lt;&gt; CoinSelection</span>
+<span class="lineno">  304 </span><span class="spaces">            </span><span class="istickedoff">{ inputs = coinMapFromList inps</span>
+<span class="lineno">  305 </span><span class="spaces">            </span><span class="istickedoff">, outputs = coinMapFromList [txout]</span>
+<span class="lineno">  306 </span><span class="spaces">            </span><span class="istickedoff">, change = mkChange txout inps</span>
+<span class="lineno">  307 </span><span class="spaces">            </span><span class="istickedoff">}</span>
+<span class="lineno">  308 </span><span class="spaces">        </span><span class="istickedoff">, utxo</span>
+<span class="lineno">  309 </span><span class="spaces">        </span><span class="istickedoff">)</span>
+<span class="lineno">  310 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  311 </span><span class="spaces">    </span><span class="istickedoff">target = mkTargetRange txout</span>
+<span class="lineno">  312 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  313 </span><span class="spaces">    </span><span class="istickedoff">improve</span>
+<span class="lineno">  314 </span><span class="spaces">        </span><span class="istickedoff">:: (Integer, [CoinMapEntry i], CoinMap i)</span>
+<span class="lineno">  315 </span><span class="spaces">        </span><span class="istickedoff">-&gt; m (Integer, [CoinMapEntry i], CoinMap i)</span>
+<span class="lineno">  316 </span><span class="spaces">    </span><span class="istickedoff">improve (maxN, inps, utxo)</span>
+<span class="lineno">  317 </span><span class="spaces">        </span><span class="istickedoff">| maxN &gt;= 1 &amp;&amp; sumEntries inps &lt; targetAim target = do</span>
+<span class="lineno">  318 </span><span class="spaces">            </span><span class="istickedoff">coinMapRandomEntry utxo &gt;&gt;= \case</span>
+<span class="lineno">  319 </span><span class="spaces">                </span><span class="istickedoff">Nothing -&gt;</span>
+<span class="lineno">  320 </span><span class="spaces">                    </span><span class="istickedoff">return (maxN, inps, utxo)</span>
+<span class="lineno">  321 </span><span class="spaces">                </span><span class="istickedoff">Just (io, utxo') | isImprovement io inps -&gt; do</span>
+<span class="lineno">  322 </span><span class="spaces">                    </span><span class="istickedoff">let inps' = io : inps</span>
+<span class="lineno">  323 </span><span class="spaces">                    </span><span class="istickedoff">let maxN' = maxN - 1</span>
+<span class="lineno">  324 </span><span class="spaces">                    </span><span class="istickedoff">improve (maxN', inps', utxo')</span>
+<span class="lineno">  325 </span><span class="spaces">                </span><span class="istickedoff">Just _ -&gt;</span>
+<span class="lineno">  326 </span><span class="spaces">                    </span><span class="istickedoff">return (maxN, inps, utxo)</span>
+<span class="lineno">  327 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> =</span>
+<span class="lineno">  328 </span><span class="spaces">            </span><span class="istickedoff">return (maxN, inps, utxo)</span>
+<span class="lineno">  329 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  330 </span><span class="spaces">    </span><span class="istickedoff">isImprovement :: CoinMapEntry i -&gt; [CoinMapEntry i] -&gt; Bool</span>
+<span class="lineno">  331 </span><span class="spaces">    </span><span class="istickedoff">isImprovement io selected =</span>
+<span class="lineno">  332 </span><span class="spaces">        </span><span class="istickedoff">let</span>
+<span class="lineno">  333 </span><span class="spaces">            </span><span class="istickedoff">condA = -- (a) It doesn’t exceed a specified upper limit.</span>
+<span class="lineno">  334 </span><span class="spaces">                </span><span class="istickedoff">sumEntries (io : selected) &lt; targetMax target</span>
+<span class="lineno">  335 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  336 </span><span class="spaces">            </span><span class="istickedoff">condB = -- (b) Addition gets us closer to the ideal change</span>
+<span class="lineno">  337 </span><span class="spaces">                </span><span class="istickedoff">distanceA &lt; distanceB</span>
+<span class="lineno">  338 </span><span class="spaces">              </span><span class="istickedoff">where</span>
+<span class="lineno">  339 </span><span class="spaces">                </span><span class="istickedoff">distanceA = C.distance</span>
+<span class="lineno">  340 </span><span class="spaces">                    </span><span class="istickedoff">(targetAim target)</span>
+<span class="lineno">  341 </span><span class="spaces">                    </span><span class="istickedoff">(sumEntries (io : selected))</span>
+<span class="lineno">  342 </span><span class="spaces">                </span><span class="istickedoff">distanceB = C.distance</span>
+<span class="lineno">  343 </span><span class="spaces">                    </span><span class="istickedoff">(targetAim target)</span>
+<span class="lineno">  344 </span><span class="spaces">                    </span><span class="istickedoff">(sumEntries selected)</span>
+<span class="lineno">  345 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  346 </span><span class="spaces">            </span><span class="istickedoff">-- (c) Doesn't exceed maximum number of inputs</span>
+<span class="lineno">  347 </span><span class="spaces">            </span><span class="istickedoff">-- Guaranteed by the precondition on 'improve'.</span>
+<span class="lineno">  348 </span><span class="spaces">        </span><span class="istickedoff">in</span>
+<span class="lineno">  349 </span><span class="spaces">            </span><span class="istickedoff">condA &amp;&amp; condB</span></span>
+<span class="lineno">  350 </span>
+<span class="lineno">  351 </span>--------------------------------------------------------------------------------
+<span class="lineno">  352 </span>-- Internals
+<span class="lineno">  353 </span>--------------------------------------------------------------------------------
+<span class="lineno">  354 </span>
+<span class="lineno">  355 </span>-- | Represents a target range of /total input values/ for a given output.
+<span class="lineno">  356 </span>--
+<span class="lineno">  357 </span>-- In this context, /total input value/ refers to the total value of a set of
+<span class="lineno">  358 </span>-- inputs selected to pay for a given output.
+<span class="lineno">  359 </span>--
+<span class="lineno">  360 </span>data TargetRange = TargetRange
+<span class="lineno">  361 </span>    { <span class="istickedoff"><span class="decl"><span class="istickedoff">targetMin</span></span></span> :: Coin
+<span class="lineno">  362 </span>        -- ^ The minimum value, corresponding to exactly the requested target
+<span class="lineno">  363 </span>        -- amount, and a change amount of zero.
+<span class="lineno">  364 </span>    , <span class="istickedoff"><span class="decl"><span class="istickedoff">targetAim</span></span></span> :: Coin
+<span class="lineno">  365 </span>        -- ^ The ideal value, corresponding to exactly twice the requested
+<span class="lineno">  366 </span>        -- target amount, and a change amount equal to the requested amount.
+<span class="lineno">  367 </span>    , <span class="istickedoff"><span class="decl"><span class="istickedoff">targetMax</span></span></span> :: Coin
+<span class="lineno">  368 </span>        -- ^ The maximum value, corresponding to exactly three times the
+<span class="lineno">  369 </span>        -- requested amount, and a change amount equal to twice the requested
+<span class="lineno">  370 </span>        -- amount.
+<span class="lineno">  371 </span>    }
+<span class="lineno">  372 </span>
+<span class="lineno">  373 </span>-- | Compute the target range of /total input values/ for a given output.
+<span class="lineno">  374 </span>--
+<span class="lineno">  375 </span>-- See 'TargetRange'.
+<span class="lineno">  376 </span>--
+<span class="lineno">  377 </span>mkTargetRange :: CoinMapEntry o -&gt; TargetRange
+<span class="lineno">  378 </span><span class="decl"><span class="istickedoff">mkTargetRange (CoinMapEntry _ c) = TargetRange</span>
+<span class="lineno">  379 </span><span class="spaces">    </span><span class="istickedoff">{ targetMin = c</span>
+<span class="lineno">  380 </span><span class="spaces">    </span><span class="istickedoff">, targetAim = c `C.add` c</span>
+<span class="lineno">  381 </span><span class="spaces">    </span><span class="istickedoff">, targetMax = c `C.add` c `C.add` c</span>
+<span class="lineno">  382 </span><span class="spaces">    </span><span class="istickedoff">}</span></span>
+<span class="lineno">  383 </span>
+<span class="lineno">  384 </span>-- | Compute change outputs from a target output and a selection of inputs.
+<span class="lineno">  385 </span>--
+<span class="lineno">  386 </span>-- Pre-condition:
+<span class="lineno">  387 </span>--
+<span class="lineno">  388 </span>-- The output must be less than (or equal to) the sum of the inputs.
+<span class="lineno">  389 </span>--
+<span class="lineno">  390 </span>mkChange :: CoinMapEntry o -&gt; [CoinMapEntry i] -&gt; [Coin]
+<span class="lineno">  391 </span><span class="decl"><span class="istickedoff">mkChange (CoinMapEntry _ out) inps =</span>
+<span class="lineno">  392 </span><span class="spaces">    </span><span class="istickedoff">case difference of</span>
+<span class="lineno">  393 </span><span class="spaces">        </span><span class="istickedoff">Nothing -&gt;</span>
+<span class="lineno">  394 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">error $ mconcat</span></span>
+<span class="lineno">  395 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">[ &quot;mkChange: &quot;</span></span>
+<span class="lineno">  396 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">, &quot;output must be less than or equal to sum of inputs&quot;</span></span>
+<span class="lineno">  397 </span><span class="spaces">                </span><span class="istickedoff"><span class="nottickedoff">]</span></span>
+<span class="lineno">  398 </span><span class="spaces">        </span><span class="istickedoff">Just d | C.isZero d -&gt;</span>
+<span class="lineno">  399 </span><span class="spaces">            </span><span class="istickedoff">[]</span>
+<span class="lineno">  400 </span><span class="spaces">        </span><span class="istickedoff">Just d -&gt;</span>
+<span class="lineno">  401 </span><span class="spaces">            </span><span class="istickedoff">[d]</span>
+<span class="lineno">  402 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  403 </span><span class="spaces">    </span><span class="istickedoff">difference = sumEntries inps `C.sub` out</span></span>
+<span class="lineno">  404 </span>
+<span class="lineno">  405 </span>--------------------------------------------------------------------------------
+<span class="lineno">  406 </span>-- Utilities
+<span class="lineno">  407 </span>--------------------------------------------------------------------------------
+<span class="lineno">  408 </span>
+<span class="lineno">  409 </span>sumEntries :: [CoinMapEntry i] -&gt; Coin
+<span class="lineno">  410 </span><span class="decl"><span class="istickedoff">sumEntries = mconcat . fmap entryValue</span></span>
 
 </pre>
 </body>

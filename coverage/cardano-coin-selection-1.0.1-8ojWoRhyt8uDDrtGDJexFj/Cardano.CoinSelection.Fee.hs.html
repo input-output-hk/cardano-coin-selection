@@ -82,667 +82,671 @@ span.spaces    { background: white }
 <span class="lineno">   63 </span>    ( StateT (..), evalStateT )
 <span class="lineno">   64 </span>import Crypto.Random.Types
 <span class="lineno">   65 </span>    ( MonadRandom )
-<span class="lineno">   66 </span>import Data.Function
-<span class="lineno">   67 </span>    ( (&amp;) )
-<span class="lineno">   68 </span>import Data.List.NonEmpty
-<span class="lineno">   69 </span>    ( NonEmpty ((:|)) )
-<span class="lineno">   70 </span>import Data.Maybe
-<span class="lineno">   71 </span>    ( fromMaybe )
-<span class="lineno">   72 </span>import Data.Ord
-<span class="lineno">   73 </span>    ( Down (..), comparing )
-<span class="lineno">   74 </span>import Data.Ratio
-<span class="lineno">   75 </span>    ( (%) )
-<span class="lineno">   76 </span>import GHC.Generics
-<span class="lineno">   77 </span>    ( Generic )
-<span class="lineno">   78 </span>import Internal.Coin
-<span class="lineno">   79 </span>    ( Coin )
-<span class="lineno">   80 </span>import Internal.Invariant
-<span class="lineno">   81 </span>    ( invariant )
-<span class="lineno">   82 </span>import Internal.Rounding
-<span class="lineno">   83 </span>    ( RoundingDirection (..), round )
-<span class="lineno">   84 </span>import Quiet
-<span class="lineno">   85 </span>    ( Quiet (Quiet) )
-<span class="lineno">   86 </span>
-<span class="lineno">   87 </span>import qualified Data.Foldable as F
-<span class="lineno">   88 </span>import qualified Data.List.NonEmpty as NE
-<span class="lineno">   89 </span>import qualified Internal.Coin as C
-<span class="lineno">   90 </span>
-<span class="lineno">   91 </span>--------------------------------------------------------------------------------
-<span class="lineno">   92 </span>-- Fundamental Types
+<span class="lineno">   66 </span>import Data.Bifunctor
+<span class="lineno">   67 </span>    ( first )
+<span class="lineno">   68 </span>import Data.Function
+<span class="lineno">   69 </span>    ( (&amp;) )
+<span class="lineno">   70 </span>import Data.List.NonEmpty
+<span class="lineno">   71 </span>    ( NonEmpty ((:|)) )
+<span class="lineno">   72 </span>import Data.Maybe
+<span class="lineno">   73 </span>    ( fromMaybe )
+<span class="lineno">   74 </span>import Data.Ord
+<span class="lineno">   75 </span>    ( Down (..), comparing )
+<span class="lineno">   76 </span>import Data.Ratio
+<span class="lineno">   77 </span>    ( (%) )
+<span class="lineno">   78 </span>import GHC.Generics
+<span class="lineno">   79 </span>    ( Generic )
+<span class="lineno">   80 </span>import Internal.Coin
+<span class="lineno">   81 </span>    ( Coin )
+<span class="lineno">   82 </span>import Internal.Invariant
+<span class="lineno">   83 </span>    ( invariant )
+<span class="lineno">   84 </span>import Internal.Rounding
+<span class="lineno">   85 </span>    ( RoundingDirection (..), round )
+<span class="lineno">   86 </span>import Quiet
+<span class="lineno">   87 </span>    ( Quiet (Quiet) )
+<span class="lineno">   88 </span>
+<span class="lineno">   89 </span>import qualified Data.Foldable as F
+<span class="lineno">   90 </span>import qualified Data.List.NonEmpty as NE
+<span class="lineno">   91 </span>import qualified Internal.Coin as C
+<span class="lineno">   92 </span>
 <span class="lineno">   93 </span>--------------------------------------------------------------------------------
-<span class="lineno">   94 </span>
-<span class="lineno">   95 </span>-- | Represents a non-negative fee to be paid on a transaction.
-<span class="lineno">   96 </span>--
-<span class="lineno">   97 </span>-- @since 1.0.0
-<span class="lineno">   98 </span>newtype Fee = Fee { <span class="istickedoff"><span class="decl"><span class="istickedoff">unFee</span></span></span> :: Coin }
-<span class="lineno">   99 </span>    deriving newtype (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Monoid</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Semigroup</span></span></span></span></span></span>)
-<span class="lineno">  100 </span>    deriving stock (<span class="decl"><span class="istickedoff">Eq</span></span>, Generic, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Ord</span></span></span></span></span></span></span></span></span></span>)
-<span class="lineno">  101 </span>    deriving <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Show</span></span></span></span></span></span> via (Quiet Fee)
-<span class="lineno">  102 </span>
-<span class="lineno">  103 </span>-- | Defines the /maximum/ size of a __dust coin__.
-<span class="lineno">  104 </span>--
-<span class="lineno">  105 </span>-- Functions that accept a 'DustThreshold' argument will generally exclude
-<span class="lineno">  106 </span>-- values that are /less than or equal to/ this threshold from the 'change'
-<span class="lineno">  107 </span>-- sets of generated selections, /coalescing/ such coins together into larger
-<span class="lineno">  108 </span>-- coins that /exceed/ the threshold.
-<span class="lineno">  109 </span>--
-<span class="lineno">  110 </span>-- Specifying a dust threshold of __/n/__ causes all coins that are less than
-<span class="lineno">  111 </span>-- or equal to __/n/__ to be treated as dust and coalesced together.
-<span class="lineno">  112 </span>--
-<span class="lineno">  113 </span>-- Specifying a dust threshold of __0__ completely /disables/ dust elimination
-<span class="lineno">  114 </span>-- with the exception of zero-valued coins, which will always be eliminated.
-<span class="lineno">  115 </span>--
-<span class="lineno">  116 </span>-- See 'coalesceDust'.
+<span class="lineno">   94 </span>-- Fundamental Types
+<span class="lineno">   95 </span>--------------------------------------------------------------------------------
+<span class="lineno">   96 </span>
+<span class="lineno">   97 </span>-- | Represents a non-negative fee to be paid on a transaction.
+<span class="lineno">   98 </span>--
+<span class="lineno">   99 </span>-- @since 1.0.0
+<span class="lineno">  100 </span>newtype Fee = Fee { <span class="istickedoff"><span class="decl"><span class="istickedoff">unFee</span></span></span> :: Coin }
+<span class="lineno">  101 </span>    deriving newtype (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="nottickedoff">Monoid</span></span></span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Semigroup</span></span></span></span></span></span>)
+<span class="lineno">  102 </span>    deriving stock (<span class="decl"><span class="istickedoff">Eq</span></span>, Generic, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Ord</span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">  103 </span>    deriving <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Show</span></span></span></span></span></span> via (Quiet Fee)
+<span class="lineno">  104 </span>
+<span class="lineno">  105 </span>-- | Defines the /maximum/ size of a __dust coin__.
+<span class="lineno">  106 </span>--
+<span class="lineno">  107 </span>-- Functions that accept a 'DustThreshold' argument will generally exclude
+<span class="lineno">  108 </span>-- values that are /less than or equal to/ this threshold from the 'change'
+<span class="lineno">  109 </span>-- sets of generated selections, /coalescing/ such coins together into larger
+<span class="lineno">  110 </span>-- coins that /exceed/ the threshold.
+<span class="lineno">  111 </span>--
+<span class="lineno">  112 </span>-- Specifying a dust threshold of __/n/__ causes all coins that are less than
+<span class="lineno">  113 </span>-- or equal to __/n/__ to be treated as dust and coalesced together.
+<span class="lineno">  114 </span>--
+<span class="lineno">  115 </span>-- Specifying a dust threshold of __0__ completely /disables/ dust elimination
+<span class="lineno">  116 </span>-- with the exception of zero-valued coins, which will always be eliminated.
 <span class="lineno">  117 </span>--
-<span class="lineno">  118 </span>-- @since 1.0.0
-<span class="lineno">  119 </span>newtype DustThreshold = DustThreshold { <span class="istickedoff"><span class="decl"><span class="istickedoff">unDustThreshold</span></span></span> :: Coin }
-<span class="lineno">  120 </span>    deriving stock (<span class="decl"><span class="istickedoff">Eq</span></span>, Generic, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Ord</span></span></span></span></span></span></span></span></span></span>)
-<span class="lineno">  121 </span>    deriving <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Show</span></span></span></span></span></span> via (Quiet DustThreshold)
-<span class="lineno">  122 </span>
-<span class="lineno">  123 </span>-- | Returns 'True' if and only if the given 'Coin' is a __dust coin__
-<span class="lineno">  124 </span>--   according to the given 'DustThreshold'.
-<span class="lineno">  125 </span>--
-<span class="lineno">  126 </span>-- A coin is considered to be a dust coin if it is /less than or equal to/
-<span class="lineno">  127 </span>-- the threshold.
-<span class="lineno">  128 </span>--
-<span class="lineno">  129 </span>-- See 'DustThreshold'.
+<span class="lineno">  118 </span>-- See 'coalesceDust'.
+<span class="lineno">  119 </span>--
+<span class="lineno">  120 </span>-- @since 1.0.0
+<span class="lineno">  121 </span>newtype DustThreshold = DustThreshold { <span class="istickedoff"><span class="decl"><span class="istickedoff">unDustThreshold</span></span></span> :: Coin }
+<span class="lineno">  122 </span>    deriving stock (<span class="decl"><span class="istickedoff">Eq</span></span>, Generic, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Ord</span></span></span></span></span></span></span></span></span></span>)
+<span class="lineno">  123 </span>    deriving <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Show</span></span></span></span></span></span> via (Quiet DustThreshold)
+<span class="lineno">  124 </span>
+<span class="lineno">  125 </span>-- | Returns 'True' if and only if the given 'Coin' is a __dust coin__
+<span class="lineno">  126 </span>--   according to the given 'DustThreshold'.
+<span class="lineno">  127 </span>--
+<span class="lineno">  128 </span>-- A coin is considered to be a dust coin if it is /less than or equal to/
+<span class="lineno">  129 </span>-- the threshold.
 <span class="lineno">  130 </span>--
-<span class="lineno">  131 </span>-- @since 1.0.1
-<span class="lineno">  132 </span>isDust :: DustThreshold -&gt; Coin -&gt; Bool
-<span class="lineno">  133 </span><span class="decl"><span class="istickedoff">isDust (DustThreshold dt) c = c &lt;= dt</span></span>
-<span class="lineno">  134 </span>
-<span class="lineno">  135 </span>-- | Provides a function capable of __estimating__ the transaction fee required
-<span class="lineno">  136 </span>--   for a given coin selection, according to the rules of a particular
-<span class="lineno">  137 </span>--   blockchain.
-<span class="lineno">  138 </span>--
-<span class="lineno">  139 </span>-- The fee estimate should be a function of the __current__ memberships of the
-<span class="lineno">  140 </span>-- 'inputs', 'outputs', and 'change' sets.
-<span class="lineno">  141 </span>--
-<span class="lineno">  142 </span>-- Depending on the rules of the blockchain under consideration, the fee
-<span class="lineno">  143 </span>-- estimate may take either (or both) of the following factors into account:
-<span class="lineno">  144 </span>--
-<span class="lineno">  145 </span>--   - the number of entries in each set;
-<span class="lineno">  146 </span>--   - the coin value of each set member.
-<span class="lineno">  147 </span>--
-<span class="lineno">  148 </span>-- A fee estimate may differ from the final fee required for a selection, as
-<span class="lineno">  149 </span>-- fees are generally paid for by /adjusting/ a given selection to make a /new/
-<span class="lineno">  150 </span>-- selection. See 'adjustForFee' for more details of this process.
-<span class="lineno">  151 </span>--
-<span class="lineno">  152 </span>-- @since 1.0.0
-<span class="lineno">  153 </span>newtype FeeEstimator i o = FeeEstimator
-<span class="lineno">  154 </span>    { <span class="istickedoff"><span class="decl"><span class="istickedoff">estimateFee</span></span></span> :: CoinSelection i o -&gt; Fee
-<span class="lineno">  155 </span>    } deriving Generic
-<span class="lineno">  156 </span>
-<span class="lineno">  157 </span>--------------------------------------------------------------------------------
-<span class="lineno">  158 </span>-- Fee Adjustment
+<span class="lineno">  131 </span>-- See 'DustThreshold'.
+<span class="lineno">  132 </span>--
+<span class="lineno">  133 </span>-- @since 1.0.1
+<span class="lineno">  134 </span>isDust :: DustThreshold -&gt; Coin -&gt; Bool
+<span class="lineno">  135 </span><span class="decl"><span class="istickedoff">isDust (DustThreshold dt) c = c &lt;= dt</span></span>
+<span class="lineno">  136 </span>
+<span class="lineno">  137 </span>-- | Provides a function capable of __estimating__ the transaction fee required
+<span class="lineno">  138 </span>--   for a given coin selection, according to the rules of a particular
+<span class="lineno">  139 </span>--   blockchain.
+<span class="lineno">  140 </span>--
+<span class="lineno">  141 </span>-- The fee estimate should be a function of the __current__ memberships of the
+<span class="lineno">  142 </span>-- 'inputs', 'outputs', and 'change' sets.
+<span class="lineno">  143 </span>--
+<span class="lineno">  144 </span>-- Depending on the rules of the blockchain under consideration, the fee
+<span class="lineno">  145 </span>-- estimate may take either (or both) of the following factors into account:
+<span class="lineno">  146 </span>--
+<span class="lineno">  147 </span>--   - the number of entries in each set;
+<span class="lineno">  148 </span>--   - the coin value of each set member.
+<span class="lineno">  149 </span>--
+<span class="lineno">  150 </span>-- A fee estimate may differ from the final fee required for a selection, as
+<span class="lineno">  151 </span>-- fees are generally paid for by /adjusting/ a given selection to make a /new/
+<span class="lineno">  152 </span>-- selection. See 'adjustForFee' for more details of this process.
+<span class="lineno">  153 </span>--
+<span class="lineno">  154 </span>-- @since 1.0.0
+<span class="lineno">  155 </span>newtype FeeEstimator i o = FeeEstimator
+<span class="lineno">  156 </span>    { <span class="istickedoff"><span class="decl"><span class="istickedoff">estimateFee</span></span></span> :: CoinSelection i o -&gt; Fee
+<span class="lineno">  157 </span>    } deriving Generic
+<span class="lineno">  158 </span>
 <span class="lineno">  159 </span>--------------------------------------------------------------------------------
-<span class="lineno">  160 </span>
-<span class="lineno">  161 </span>-- | Provides options for fee adjustment.
-<span class="lineno">  162 </span>--
-<span class="lineno">  163 </span>-- @since 1.0.0
-<span class="lineno">  164 </span>data FeeOptions i o = FeeOptions
-<span class="lineno">  165 </span>    { <span class="istickedoff"><span class="decl"><span class="istickedoff">feeEstimator</span></span></span>
-<span class="lineno">  166 </span>        :: FeeEstimator i o
-<span class="lineno">  167 </span>        -- ^ Estimate fees based on selected inputs and requested outputs.
-<span class="lineno">  168 </span>
-<span class="lineno">  169 </span>    , <span class="istickedoff"><span class="decl"><span class="istickedoff">dustThreshold</span></span></span>
-<span class="lineno">  170 </span>        :: DustThreshold
-<span class="lineno">  171 </span>        -- ^ The threshold to use for dust elimination. Specifying a threshold
-<span class="lineno">  172 </span>        -- of zero will disable dust elimination. See 'DustThreshold' for more
-<span class="lineno">  173 </span>        -- details.
-<span class="lineno">  174 </span>
-<span class="lineno">  175 </span>    , <span class="istickedoff"><span class="decl"><span class="istickedoff">feeBalancingPolicy</span></span></span>
-<span class="lineno">  176 </span>        :: FeeBalancingPolicy
-<span class="lineno">  177 </span>        -- ^ Which fee balancing policy to use.
-<span class="lineno">  178 </span>    } deriving Generic
-<span class="lineno">  179 </span>
-<span class="lineno">  180 </span>-- | A choice of fee balancing policies for use when adjusting a coin selection.
-<span class="lineno">  181 </span>--
-<span class="lineno">  182 </span>-- == Background
+<span class="lineno">  160 </span>-- Fee Adjustment
+<span class="lineno">  161 </span>--------------------------------------------------------------------------------
+<span class="lineno">  162 </span>
+<span class="lineno">  163 </span>-- | Provides options for fee adjustment.
+<span class="lineno">  164 </span>--
+<span class="lineno">  165 </span>-- @since 1.0.0
+<span class="lineno">  166 </span>data FeeOptions i o = FeeOptions
+<span class="lineno">  167 </span>    { <span class="istickedoff"><span class="decl"><span class="istickedoff">feeEstimator</span></span></span>
+<span class="lineno">  168 </span>        :: FeeEstimator i o
+<span class="lineno">  169 </span>        -- ^ Estimate fees based on selected inputs and requested outputs.
+<span class="lineno">  170 </span>
+<span class="lineno">  171 </span>    , <span class="istickedoff"><span class="decl"><span class="istickedoff">dustThreshold</span></span></span>
+<span class="lineno">  172 </span>        :: DustThreshold
+<span class="lineno">  173 </span>        -- ^ The threshold to use for dust elimination. Specifying a threshold
+<span class="lineno">  174 </span>        -- of zero will disable dust elimination. See 'DustThreshold' for more
+<span class="lineno">  175 </span>        -- details.
+<span class="lineno">  176 </span>
+<span class="lineno">  177 </span>    , <span class="istickedoff"><span class="decl"><span class="istickedoff">feeBalancingPolicy</span></span></span>
+<span class="lineno">  178 </span>        :: FeeBalancingPolicy
+<span class="lineno">  179 </span>        -- ^ Which fee balancing policy to use.
+<span class="lineno">  180 </span>    } deriving Generic
+<span class="lineno">  181 </span>
+<span class="lineno">  182 </span>-- | A choice of fee balancing policies for use when adjusting a coin selection.
 <span class="lineno">  183 </span>--
-<span class="lineno">  184 </span>-- A coin selection __'s'__ is said to have a /perfectly-balanced/ fee when it
-<span class="lineno">  185 </span>-- satisfies the following property:
-<span class="lineno">  186 </span>--
-<span class="lineno">  187 </span>-- &gt;&gt;&gt; sumInputs s = sumOutputs s + sumChange s + estimateFee s
+<span class="lineno">  184 </span>-- == Background
+<span class="lineno">  185 </span>--
+<span class="lineno">  186 </span>-- A coin selection __'s'__ is said to have a /perfectly-balanced/ fee when it
+<span class="lineno">  187 </span>-- satisfies the following property:
 <span class="lineno">  188 </span>--
-<span class="lineno">  189 </span>-- Conversely, a selection is said to have an /unbalanced/ fee when it
-<span class="lineno">  190 </span>-- satisfies the following property:
-<span class="lineno">  191 </span>--
-<span class="lineno">  192 </span>-- &gt;&gt;&gt; sumInputs s &gt; sumOutputs s + sumChange s + estimateFee s
+<span class="lineno">  189 </span>-- &gt;&gt;&gt; sumInputs s = sumOutputs s + sumChange s + estimateFee s
+<span class="lineno">  190 </span>--
+<span class="lineno">  191 </span>-- Conversely, a selection is said to have an /unbalanced/ fee when it
+<span class="lineno">  192 </span>-- satisfies the following property:
 <span class="lineno">  193 </span>--
-<span class="lineno">  194 </span>-- In other words, if a coin selection has an /unbalanced/ fee, the /effective/
-<span class="lineno">  195 </span>-- fee is greater than the minimum fee /actually required/ by the blockchain.
-<span class="lineno">  196 </span>--
-<span class="lineno">  197 </span>-- == Balanced Fees vs Minimal Fees
+<span class="lineno">  194 </span>-- &gt;&gt;&gt; sumInputs s &gt; sumOutputs s + sumChange s + estimateFee s
+<span class="lineno">  195 </span>--
+<span class="lineno">  196 </span>-- In other words, if a coin selection has an /unbalanced/ fee, the /effective/
+<span class="lineno">  197 </span>-- fee is greater than the minimum fee /actually required/ by the blockchain.
 <span class="lineno">  198 </span>--
-<span class="lineno">  199 </span>-- Some blockchains /require /that fees are always /perfectly-balanced/.
+<span class="lineno">  199 </span>-- == Balanced Fees vs Minimal Fees
 <span class="lineno">  200 </span>--
-<span class="lineno">  201 </span>-- However, for blockchains that allow /unbalanced/ fees, it is sometimes
-<span class="lineno">  202 </span>-- possible to /save money/ by generating a coin selection with an unbalanced
-<span class="lineno">  203 </span>-- fee. This may seem counterintuitive at first, but consider an individual
-<span class="lineno">  204 </span>-- change ouput __/c/__ of value __/v/__. If the /marginal fee/ __/f/__
-<span class="lineno">  205 </span>-- associated with __/c/__ is greater than its value __/v/__, then we will
-<span class="lineno">  206 </span>-- /save money/ by __not__ including __/c/__ within 'change'.
-<span class="lineno">  207 </span>--
-<span class="lineno">  208 </span>-- There are two policy choices available for handling change values with
-<span class="lineno">  209 </span>-- marginal fees greater than their value:
-<span class="lineno">  210 </span>--
-<span class="lineno">  211 </span>--   - For blockchains that __allow__ transactions with /unbalanced/ fees,
-<span class="lineno">  212 </span>--     specifying the 'RequireMinimalFee' policy will allow money to be saved by
-<span class="lineno">  213 </span>--     /excluding/ change outputs that have a marginal fee greater than
-<span class="lineno">  214 </span>--     their value.
-<span class="lineno">  215 </span>--
-<span class="lineno">  216 </span>--   - For blockchains that do __not__ allow transactions with /unbalanced/
-<span class="lineno">  217 </span>--     fees, specifying the 'RequireBalancedFee' policy will always generate
-<span class="lineno">  218 </span>--     selections with fees that are perfectly-balanced, even if the resulting
-<span class="lineno">  219 </span>--     fees are higher than could be achieved by allowing unbalanced fees.
-<span class="lineno">  220 </span>--
-<span class="lineno">  221 </span>data FeeBalancingPolicy
-<span class="lineno">  222 </span>    = RequireBalancedFee
-<span class="lineno">  223 </span>        -- ^ Generate selections with fees that are perfectly balanced, with the
-<span class="lineno">  224 </span>        -- trade-off of allowing slightly higher fees.
-<span class="lineno">  225 </span>    | RequireMinimalFee
-<span class="lineno">  226 </span>        -- ^ Generate selections with the lowest fees possible, with the
-<span class="lineno">  227 </span>        -- trade-off of allowing slightly imbalanced fees.
-<span class="lineno">  228 </span>    deriving (Generic, <span class="decl"><span class="istickedoff">Show</span></span>, <span class="decl"><span class="istickedoff">Eq</span></span>)
-<span class="lineno">  229 </span>
-<span class="lineno">  230 </span>-- | Represents the set of possible failures that can occur when adjusting a
-<span class="lineno">  231 </span>--   'CoinSelection' with the 'adjustForFee' function.
-<span class="lineno">  232 </span>--
-<span class="lineno">  233 </span>data FeeAdjustmentError i o
-<span class="lineno">  234 </span>    = CannotCoverFee Fee
-<span class="lineno">  235 </span>    -- ^ Indicates that the given map of additional inputs was exhausted while
-<span class="lineno">  236 </span>    --   attempting to select extra inputs to cover the required fee.
-<span class="lineno">  237 </span>    --
-<span class="lineno">  238 </span>    -- Records the shortfall (__/f/__ − __/s/__) between the required fee
-<span class="lineno">  239 </span>    -- __/f/__ and the total value __/s/__ of currently-selected inputs.
-<span class="lineno">  240 </span>
-<span class="lineno">  241 </span>    | CoinSelectionUnderfunded (CoinSelection i o)
-<span class="lineno">  242 </span>    -- ^ Indicates that the given coin selection is __underfunded__: the total
-<span class="lineno">  243 </span>    -- value of 'inputs' is less than the total value of 'outputs', as
-<span class="lineno">  244 </span>    -- calculated by the 'CoinSelection.coinMapValue' function.
-<span class="lineno">  245 </span>    deriving (<span class="decl"><span class="istickedoff">Show</span></span>, <span class="decl"><span class="istickedoff">Eq</span></span>)
-<span class="lineno">  246 </span>
-<span class="lineno">  247 </span>-- | Adjusts the given 'CoinSelection' in order to pay for a __transaction__
-<span class="lineno">  248 </span>--   __fee__, required in order to publish the selection as a transaction on
-<span class="lineno">  249 </span>--   a blockchain.
-<span class="lineno">  250 </span>--
-<span class="lineno">  251 </span>-- == Background
+<span class="lineno">  201 </span>-- Some blockchains /require /that fees are always /perfectly-balanced/.
+<span class="lineno">  202 </span>--
+<span class="lineno">  203 </span>-- However, for blockchains that allow /unbalanced/ fees, it is sometimes
+<span class="lineno">  204 </span>-- possible to /save money/ by generating a coin selection with an unbalanced
+<span class="lineno">  205 </span>-- fee. This may seem counterintuitive at first, but consider an individual
+<span class="lineno">  206 </span>-- change ouput __/c/__ of value __/v/__. If the /marginal fee/ __/f/__
+<span class="lineno">  207 </span>-- associated with __/c/__ is greater than its value __/v/__, then we will
+<span class="lineno">  208 </span>-- /save money/ by __not__ including __/c/__ within 'change'.
+<span class="lineno">  209 </span>--
+<span class="lineno">  210 </span>-- There are two policy choices available for handling change values with
+<span class="lineno">  211 </span>-- marginal fees greater than their value:
+<span class="lineno">  212 </span>--
+<span class="lineno">  213 </span>--   - For blockchains that __allow__ transactions with /unbalanced/ fees,
+<span class="lineno">  214 </span>--     specifying the 'RequireMinimalFee' policy will allow money to be saved by
+<span class="lineno">  215 </span>--     /excluding/ change outputs that have a marginal fee greater than
+<span class="lineno">  216 </span>--     their value.
+<span class="lineno">  217 </span>--
+<span class="lineno">  218 </span>--   - For blockchains that do __not__ allow transactions with /unbalanced/
+<span class="lineno">  219 </span>--     fees, specifying the 'RequireBalancedFee' policy will always generate
+<span class="lineno">  220 </span>--     selections with fees that are perfectly-balanced, even if the resulting
+<span class="lineno">  221 </span>--     fees are higher than could be achieved by allowing unbalanced fees.
+<span class="lineno">  222 </span>--
+<span class="lineno">  223 </span>data FeeBalancingPolicy
+<span class="lineno">  224 </span>    = RequireBalancedFee
+<span class="lineno">  225 </span>        -- ^ Generate selections with fees that are perfectly balanced, with the
+<span class="lineno">  226 </span>        -- trade-off of allowing slightly higher fees.
+<span class="lineno">  227 </span>    | RequireMinimalFee
+<span class="lineno">  228 </span>        -- ^ Generate selections with the lowest fees possible, with the
+<span class="lineno">  229 </span>        -- trade-off of allowing slightly imbalanced fees.
+<span class="lineno">  230 </span>    deriving (Generic, <span class="decl"><span class="istickedoff">Show</span></span>, <span class="decl"><span class="istickedoff">Eq</span></span>)
+<span class="lineno">  231 </span>
+<span class="lineno">  232 </span>-- | Represents the set of possible failures that can occur when adjusting a
+<span class="lineno">  233 </span>--   'CoinSelection' with the 'adjustForFee' function.
+<span class="lineno">  234 </span>--
+<span class="lineno">  235 </span>data FeeAdjustmentError i o
+<span class="lineno">  236 </span>    = CannotCoverFee Fee
+<span class="lineno">  237 </span>    -- ^ Indicates that the given map of additional inputs was exhausted while
+<span class="lineno">  238 </span>    --   attempting to select extra inputs to cover the required fee.
+<span class="lineno">  239 </span>    --
+<span class="lineno">  240 </span>    -- Records the shortfall (__/f/__ − __/s/__) between the required fee
+<span class="lineno">  241 </span>    -- __/f/__ and the total value __/s/__ of currently-selected inputs.
+<span class="lineno">  242 </span>
+<span class="lineno">  243 </span>    | CoinSelectionUnderfunded (CoinSelection i o)
+<span class="lineno">  244 </span>    -- ^ Indicates that the given coin selection is __underfunded__: the total
+<span class="lineno">  245 </span>    -- value of 'inputs' is less than the total value of 'outputs', as
+<span class="lineno">  246 </span>    -- calculated by the 'CoinSelection.coinMapValue' function.
+<span class="lineno">  247 </span>    deriving (<span class="decl"><span class="istickedoff">Show</span></span>, <span class="decl"><span class="istickedoff">Eq</span></span>)
+<span class="lineno">  248 </span>
+<span class="lineno">  249 </span>-- | Adjusts the given 'CoinSelection' in order to pay for a __transaction__
+<span class="lineno">  250 </span>--   __fee__, required in order to publish the selection as a transaction on
+<span class="lineno">  251 </span>--   a blockchain.
 <span class="lineno">  252 </span>--
-<span class="lineno">  253 </span>-- Implementations of 'Cardano.CoinSelection.CoinSelectionAlgorithm' generally
-<span class="lineno">  254 </span>-- produce coin selections that are /exactly balanced/, satisfying the
-<span class="lineno">  255 </span>-- following equality:
-<span class="lineno">  256 </span>--
-<span class="lineno">  257 </span>-- &gt;&gt;&gt; sumInputs s = sumOutputs s + sumChange s
+<span class="lineno">  253 </span>-- == Background
+<span class="lineno">  254 </span>--
+<span class="lineno">  255 </span>-- Implementations of 'Cardano.CoinSelection.CoinSelectionAlgorithm' generally
+<span class="lineno">  256 </span>-- produce coin selections that are /exactly balanced/, satisfying the
+<span class="lineno">  257 </span>-- following equality:
 <span class="lineno">  258 </span>--
-<span class="lineno">  259 </span>-- In order to pay for a transaction fee, the above equality must be
-<span class="lineno">  260 </span>-- transformed into an /inequality/:
-<span class="lineno">  261 </span>--
-<span class="lineno">  262 </span>-- &gt;&gt;&gt; sumInputs s &gt; sumOutputs s + sumChange s
+<span class="lineno">  259 </span>-- &gt;&gt;&gt; sumInputs s = sumOutputs s + sumChange s
+<span class="lineno">  260 </span>--
+<span class="lineno">  261 </span>-- In order to pay for a transaction fee, the above equality must be
+<span class="lineno">  262 </span>-- transformed into an /inequality/:
 <span class="lineno">  263 </span>--
-<span class="lineno">  264 </span>-- The difference between these two sides represents value to be paid /by the/
-<span class="lineno">  265 </span>-- /originator/ of the transaction, in the form of a fee:
-<span class="lineno">  266 </span>--
-<span class="lineno">  267 </span>-- &gt;&gt;&gt; sumInputs s = sumOutputs s + sumChange s + fee
+<span class="lineno">  264 </span>-- &gt;&gt;&gt; sumInputs s &gt; sumOutputs s + sumChange s
+<span class="lineno">  265 </span>--
+<span class="lineno">  266 </span>-- The difference between these two sides represents value to be paid /by the/
+<span class="lineno">  267 </span>-- /originator/ of the transaction, in the form of a fee:
 <span class="lineno">  268 </span>--
-<span class="lineno">  269 </span>-- == The Adjustment Process
+<span class="lineno">  269 </span>-- &gt;&gt;&gt; sumInputs s = sumOutputs s + sumChange s + fee
 <span class="lineno">  270 </span>--
-<span class="lineno">  271 </span>-- In order to generate a fee that is acceptable to the network, this function
-<span class="lineno">  272 </span>-- adjusts the 'change' and 'inputs' of the given 'CoinSelection', consulting
-<span class="lineno">  273 </span>-- the 'FeeEstimator' as a guide for how much the current selection would cost
-<span class="lineno">  274 </span>-- to publish as a transaction on the network.
-<span class="lineno">  275 </span>--
-<span class="lineno">  276 </span>-- == Methods of Adjustment
+<span class="lineno">  271 </span>-- == The Adjustment Process
+<span class="lineno">  272 </span>--
+<span class="lineno">  273 </span>-- In order to generate a fee that is acceptable to the network, this function
+<span class="lineno">  274 </span>-- adjusts the 'change' and 'inputs' of the given 'CoinSelection', consulting
+<span class="lineno">  275 </span>-- the 'FeeEstimator' as a guide for how much the current selection would cost
+<span class="lineno">  276 </span>-- to publish as a transaction on the network.
 <span class="lineno">  277 </span>--
-<span class="lineno">  278 </span>-- There are two methods of adjustment possible:
+<span class="lineno">  278 </span>-- == Methods of Adjustment
 <span class="lineno">  279 </span>--
-<span class="lineno">  280 </span>--  1. The __'change'__ set can be /reduced/, either by:
+<span class="lineno">  280 </span>-- There are two methods of adjustment possible:
 <span class="lineno">  281 </span>--
-<span class="lineno">  282 </span>--      a. completely removing a change value from the set; or by
+<span class="lineno">  282 </span>--  1. The __'change'__ set can be /reduced/, either by:
 <span class="lineno">  283 </span>--
-<span class="lineno">  284 </span>--      b. reducing a change value to a lower value.
+<span class="lineno">  284 </span>--      a. completely removing a change value from the set; or by
 <span class="lineno">  285 </span>--
-<span class="lineno">  286 </span>--  2. The __'inputs'__ set can be /augmented/, by selecting additional inputs
-<span class="lineno">  287 </span>--     from the specified 'CoinMap' argument.
-<span class="lineno">  288 </span>--
-<span class="lineno">  289 </span>-- == Dealing with Dust Values
+<span class="lineno">  286 </span>--      b. reducing a change value to a lower value.
+<span class="lineno">  287 </span>--
+<span class="lineno">  288 </span>--  2. The __'inputs'__ set can be /augmented/, by selecting additional inputs
+<span class="lineno">  289 </span>--     from the specified 'CoinMap' argument.
 <span class="lineno">  290 </span>--
-<span class="lineno">  291 </span>-- If, at any point, a change value is generated that is less than or equal
-<span class="lineno">  292 </span>-- to the 'DustThreshold', this function will eliminate that change value
-<span class="lineno">  293 </span>-- from the 'change' set, redistributing the eliminated value over the remaining
-<span class="lineno">  294 </span>-- change values, ensuring that the total value of all 'change' is preserved.
-<span class="lineno">  295 </span>--
-<span class="lineno">  296 </span>-- See 'coalesceDust' for more details.
+<span class="lineno">  291 </span>-- == Dealing with Dust Values
+<span class="lineno">  292 </span>--
+<span class="lineno">  293 </span>-- If, at any point, a change value is generated that is less than or equal
+<span class="lineno">  294 </span>-- to the 'DustThreshold', this function will eliminate that change value
+<span class="lineno">  295 </span>-- from the 'change' set, redistributing the eliminated value over the remaining
+<span class="lineno">  296 </span>-- change values, ensuring that the total value of all 'change' is preserved.
 <span class="lineno">  297 </span>--
-<span class="lineno">  298 </span>-- == Termination
+<span class="lineno">  298 </span>-- See 'coalesceDust' for more details.
 <span class="lineno">  299 </span>--
-<span class="lineno">  300 </span>-- Since adjusting a selection can affect the fee estimate produced by
-<span class="lineno">  301 </span>-- 'estimateFee', the process of adjustment is an /iterative/ process.
-<span class="lineno">  302 </span>--
-<span class="lineno">  303 </span>-- The termination post-condition depends on the choice of
-<span class="lineno">  304 </span>-- 'FeeBalancingPolicy':
-<span class="lineno">  305 </span>--
-<span class="lineno">  306 </span>--   - If 'RequireBalancedFee' is specified, this function terminates
-<span class="lineno">  307 </span>--     only when it has generated a 'CoinSelection' __'s'__ that satisfies the
-<span class="lineno">  308 </span>--     following property:
-<span class="lineno">  309 </span>--
-<span class="lineno">  310 </span>--         &gt;&gt;&gt; sumInputs s = sumOutputs s + sumChange s + estimateFee s
+<span class="lineno">  300 </span>-- == Termination
+<span class="lineno">  301 </span>--
+<span class="lineno">  302 </span>-- Since adjusting a selection can affect the fee estimate produced by
+<span class="lineno">  303 </span>-- 'estimateFee', the process of adjustment is an /iterative/ process.
+<span class="lineno">  304 </span>--
+<span class="lineno">  305 </span>-- The termination post-condition depends on the choice of
+<span class="lineno">  306 </span>-- 'FeeBalancingPolicy':
+<span class="lineno">  307 </span>--
+<span class="lineno">  308 </span>--   - If 'RequireBalancedFee' is specified, this function terminates
+<span class="lineno">  309 </span>--     only when it has generated a 'CoinSelection' __'s'__ that satisfies the
+<span class="lineno">  310 </span>--     following property:
 <span class="lineno">  311 </span>--
-<span class="lineno">  312 </span>--   - If 'RequireMinimalFee' policy is specified, the above /equality/
-<span class="lineno">  313 </span>--     is relaxed to the following /inequality/:
-<span class="lineno">  314 </span>--
-<span class="lineno">  315 </span>--         &gt;&gt;&gt; sumInputs s ≥ sumOutputs s + sumChange s + estimateFee s
+<span class="lineno">  312 </span>--         &gt;&gt;&gt; sumInputs s = sumOutputs s + sumChange s + estimateFee s
+<span class="lineno">  313 </span>--
+<span class="lineno">  314 </span>--   - If 'RequireMinimalFee' policy is specified, the above /equality/
+<span class="lineno">  315 </span>--     is relaxed to the following /inequality/:
 <span class="lineno">  316 </span>--
-<span class="lineno">  317 </span>-- See 'FeeBalancingPolicy' for more details.
+<span class="lineno">  317 </span>--         &gt;&gt;&gt; sumInputs s ≥ sumOutputs s + sumChange s + estimateFee s
 <span class="lineno">  318 </span>--
-<span class="lineno">  319 </span>-- @since 1.0.0
-<span class="lineno">  320 </span>adjustForFee
-<span class="lineno">  321 </span>    :: (Ord i, MonadRandom m)
-<span class="lineno">  322 </span>    =&gt; FeeOptions i o
-<span class="lineno">  323 </span>    -&gt; CoinMap i
-<span class="lineno">  324 </span>    -&gt; CoinSelection i o
-<span class="lineno">  325 </span>    -&gt; ExceptT (FeeAdjustmentError i o) m (CoinSelection i o)
-<span class="lineno">  326 </span><span class="decl"><span class="istickedoff">adjustForFee unsafeOpt utxo coinSel = do</span>
-<span class="lineno">  327 </span><span class="spaces">    </span><span class="istickedoff">let opt = invariant</span>
-<span class="lineno">  328 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">&quot;adjustForFee: fee must be non-null&quot;</span> unsafeOpt (not . nullFee)</span>
-<span class="lineno">  329 </span><span class="spaces">    </span><span class="istickedoff">senderPaysFee opt utxo coinSel</span>
-<span class="lineno">  330 </span><span class="spaces">  </span><span class="istickedoff">where</span>
-<span class="lineno">  331 </span><span class="spaces">    </span><span class="istickedoff">nullFee opt = estimateFee (feeEstimator opt) <span class="nottickedoff">coinSel</span> == Fee C.zero</span></span>
-<span class="lineno">  332 </span>
-<span class="lineno">  333 </span>--------------------------------------------------------------------------------
-<span class="lineno">  334 </span>-- Internal Functions
+<span class="lineno">  319 </span>-- See 'FeeBalancingPolicy' for more details.
+<span class="lineno">  320 </span>--
+<span class="lineno">  321 </span>-- @since 1.0.0
+<span class="lineno">  322 </span>adjustForFee
+<span class="lineno">  323 </span>    :: (Ord i, MonadRandom m)
+<span class="lineno">  324 </span>    =&gt; FeeOptions i o
+<span class="lineno">  325 </span>    -&gt; CoinMap i
+<span class="lineno">  326 </span>    -&gt; CoinSelection i o
+<span class="lineno">  327 </span>    -&gt; ExceptT (FeeAdjustmentError i o) m (CoinSelection i o)
+<span class="lineno">  328 </span><span class="decl"><span class="istickedoff">adjustForFee unsafeOpt utxo coinSel = do</span>
+<span class="lineno">  329 </span><span class="spaces">    </span><span class="istickedoff">let opt = invariant</span>
+<span class="lineno">  330 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">&quot;adjustForFee: fee must be non-null&quot;</span> unsafeOpt (not . nullFee)</span>
+<span class="lineno">  331 </span><span class="spaces">    </span><span class="istickedoff">senderPaysFee opt utxo coinSel</span>
+<span class="lineno">  332 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  333 </span><span class="spaces">    </span><span class="istickedoff">nullFee opt = estimateFee (feeEstimator opt) <span class="nottickedoff">coinSel</span> == Fee C.zero</span></span>
+<span class="lineno">  334 </span>
 <span class="lineno">  335 </span>--------------------------------------------------------------------------------
-<span class="lineno">  336 </span>
-<span class="lineno">  337 </span>-- Calculates the current fee associated with a given 'CoinSelection'.
-<span class="lineno">  338 </span>--
-<span class="lineno">  339 </span>-- If the result is less than zero, returns 'Nothing'.
+<span class="lineno">  336 </span>-- Internal Functions
+<span class="lineno">  337 </span>--------------------------------------------------------------------------------
+<span class="lineno">  338 </span>
+<span class="lineno">  339 </span>-- Calculates the current fee associated with a given 'CoinSelection'.
 <span class="lineno">  340 </span>--
-<span class="lineno">  341 </span>calculateFee :: CoinSelection i o -&gt; Maybe Fee
-<span class="lineno">  342 </span><span class="decl"><span class="nottickedoff">calculateFee s = Fee &lt;$&gt; sumInputs s `C.sub` (sumOutputs s `C.add` sumChange s)</span></span>
-<span class="lineno">  343 </span>
-<span class="lineno">  344 </span>-- The sender pays fee in this scenario, so fees are removed from the change
-<span class="lineno">  345 </span>-- outputs, and new inputs are selected if necessary.
-<span class="lineno">  346 </span>--
-<span class="lineno">  347 </span>senderPaysFee
-<span class="lineno">  348 </span>    :: forall i o m . (Ord i, MonadRandom m)
-<span class="lineno">  349 </span>    =&gt; FeeOptions i o
-<span class="lineno">  350 </span>    -&gt; CoinMap i
-<span class="lineno">  351 </span>    -&gt; CoinSelection i o
-<span class="lineno">  352 </span>    -&gt; ExceptT (FeeAdjustmentError i o) m (CoinSelection i o)
-<span class="lineno">  353 </span><span class="decl"><span class="istickedoff">senderPaysFee opts utxo sel =</span>
-<span class="lineno">  354 </span><span class="spaces">    </span><span class="istickedoff">evalStateT (go sel) utxo</span>
-<span class="lineno">  355 </span><span class="spaces">  </span><span class="istickedoff">where</span>
-<span class="lineno">  356 </span><span class="spaces">    </span><span class="istickedoff">go</span>
-<span class="lineno">  357 </span><span class="spaces">        </span><span class="istickedoff">:: CoinSelection i o</span>
-<span class="lineno">  358 </span><span class="spaces">        </span><span class="istickedoff">-&gt; StateT</span>
-<span class="lineno">  359 </span><span class="spaces">            </span><span class="istickedoff">(CoinMap i)</span>
-<span class="lineno">  360 </span><span class="spaces">            </span><span class="istickedoff">(ExceptT (FeeAdjustmentError i o) m)</span>
-<span class="lineno">  361 </span><span class="spaces">            </span><span class="istickedoff">(CoinSelection i o)</span>
-<span class="lineno">  362 </span><span class="spaces">    </span><span class="istickedoff">go coinSel@(CoinSelection inps outs chgs) = do</span>
-<span class="lineno">  363 </span><span class="spaces">        </span><span class="istickedoff">-- Substract fee from change outputs, proportionally to their value.</span>
-<span class="lineno">  364 </span><span class="spaces">        </span><span class="istickedoff">(coinSel', remFee) &lt;- lift $ except $ reduceChangeOutputs opts coinSel</span>
-<span class="lineno">  365 </span><span class="spaces"></span><span class="istickedoff"></span>
-<span class="lineno">  366 </span><span class="spaces">        </span><span class="istickedoff">-- Should the change cover the fee, we're (almost) good. By removing</span>
-<span class="lineno">  367 </span><span class="spaces">        </span><span class="istickedoff">-- change outputs, we make them smaller and may reduce the size of the</span>
-<span class="lineno">  368 </span><span class="spaces">        </span><span class="istickedoff">-- transaction, and the fee. Thus, we end up paying slightly more than</span>
-<span class="lineno">  369 </span><span class="spaces">        </span><span class="istickedoff">-- the upper bound. We could do some binary search and try to</span>
-<span class="lineno">  370 </span><span class="spaces">        </span><span class="istickedoff">-- re-distribute excess across changes until fee becomes bigger.</span>
-<span class="lineno">  371 </span><span class="spaces">        </span><span class="istickedoff">if remFee == Fee C.zero</span>
-<span class="lineno">  372 </span><span class="spaces">        </span><span class="istickedoff">then pure coinSel'</span>
-<span class="lineno">  373 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
-<span class="lineno">  374 </span><span class="spaces">            </span><span class="istickedoff">-- Otherwise, we need an extra entries from the available utxo to</span>
-<span class="lineno">  375 </span><span class="spaces">            </span><span class="istickedoff">-- cover what's left. Note that this entry may increase our change</span>
-<span class="lineno">  376 </span><span class="spaces">            </span><span class="istickedoff">-- because we may not consume it entirely. So we will just split</span>
-<span class="lineno">  377 </span><span class="spaces">            </span><span class="istickedoff">-- the extra change across all changes possibly increasing the</span>
-<span class="lineno">  378 </span><span class="spaces">            </span><span class="istickedoff">-- number of change outputs (if there was none, or if increasing a</span>
-<span class="lineno">  379 </span><span class="spaces">            </span><span class="istickedoff">-- change value causes an overflow).</span>
-<span class="lineno">  380 </span><span class="spaces">            </span><span class="istickedoff">--</span>
-<span class="lineno">  381 </span><span class="spaces">            </span><span class="istickedoff">-- Because selecting a new input increases the fee, we need to</span>
-<span class="lineno">  382 </span><span class="spaces">            </span><span class="istickedoff">-- re-run the algorithm with this new elements and using the initial</span>
-<span class="lineno">  383 </span><span class="spaces">            </span><span class="istickedoff">-- change plus the extra change brought up by this entry and see if</span>
-<span class="lineno">  384 </span><span class="spaces">            </span><span class="istickedoff">-- we can now correctly cover fee.</span>
-<span class="lineno">  385 </span><span class="spaces">            </span><span class="istickedoff">inps' &lt;- coverRemainingFee remFee</span>
-<span class="lineno">  386 </span><span class="spaces">            </span><span class="istickedoff">let extraChange = splitCoin (sumEntries inps') chgs</span>
-<span class="lineno">  387 </span><span class="spaces">            </span><span class="istickedoff">go $ CoinSelection (inps &lt;&gt; coinMapFromList inps') outs extraChange</span></span>
-<span class="lineno">  388 </span>
-<span class="lineno">  389 </span>-- A short and simple version of the 'random' fee policy to cover for the fee
-<span class="lineno">  390 </span>-- in the case where existing set of change is not enough.
-<span class="lineno">  391 </span>--
-<span class="lineno">  392 </span>coverRemainingFee
-<span class="lineno">  393 </span>    :: MonadRandom m
-<span class="lineno">  394 </span>    =&gt; Fee
-<span class="lineno">  395 </span>    -&gt; StateT (CoinMap i) (ExceptT (FeeAdjustmentError i o) m) [CoinMapEntry i]
-<span class="lineno">  396 </span><span class="decl"><span class="istickedoff">coverRemainingFee (Fee fee) = go [] where</span>
-<span class="lineno">  397 </span><span class="spaces">    </span><span class="istickedoff">go acc</span>
-<span class="lineno">  398 </span><span class="spaces">        </span><span class="istickedoff">| sumEntries acc &gt;= fee =</span>
-<span class="lineno">  399 </span><span class="spaces">            </span><span class="istickedoff">return acc</span>
-<span class="lineno">  400 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = do</span>
-<span class="lineno">  401 </span><span class="spaces">            </span><span class="istickedoff">-- We ignore the size of the fee, and just pick randomly</span>
-<span class="lineno">  402 </span><span class="spaces">            </span><span class="istickedoff">StateT (lift . coinMapRandomEntry) &gt;&gt;= \case</span>
-<span class="lineno">  403 </span><span class="spaces">                </span><span class="istickedoff">Just entry -&gt;</span>
-<span class="lineno">  404 </span><span class="spaces">                    </span><span class="istickedoff">go (entry : acc)</span>
-<span class="lineno">  405 </span><span class="spaces">                </span><span class="istickedoff">Nothing -&gt;</span>
-<span class="lineno">  406 </span><span class="spaces">                    </span><span class="istickedoff">lift $ throwE $ CannotCoverFee $ Fee $</span>
-<span class="lineno">  407 </span><span class="spaces">                        </span><span class="istickedoff">fee `C.distance` (sumEntries acc)</span></span>
-<span class="lineno">  408 </span>
-<span class="lineno">  409 </span>-- Pays for the given fee by subtracting it from the given list of change
-<span class="lineno">  410 </span>-- outputs, so that each change output is reduced by a portion of the fee
-<span class="lineno">  411 </span>-- that's in proportion to its relative size.
-<span class="lineno">  412 </span>--
-<span class="lineno">  413 </span>-- == Basic Examples
-<span class="lineno">  414 </span>--
-<span class="lineno">  415 </span>-- &gt;&gt;&gt; reduceChangeOutputs (DustThreshold 0) (Fee 4) (Coin &lt;$&gt; [2, 2, 2, 2])
-<span class="lineno">  416 </span>-- [Coin 1, Coin 1, Coin 1, Coin 1]
-<span class="lineno">  417 </span>--
-<span class="lineno">  418 </span>-- &gt;&gt;&gt; reduceChangeOutputs (DustThreshold 0) (Fee 15) (Coin &lt;$&gt; [2, 4, 8, 16])
-<span class="lineno">  419 </span>-- [Coin 1, Coin 2, Coin 4, Coin 8]
-<span class="lineno">  420 </span>--
-<span class="lineno">  421 </span>-- == Handling Dust
-<span class="lineno">  422 </span>--
-<span class="lineno">  423 </span>-- Any dust outputs in the resulting list are coalesced according to the given
-<span class="lineno">  424 </span>-- dust threshold: (See 'coalesceDust'.)
-<span class="lineno">  425 </span>--
-<span class="lineno">  426 </span>-- &gt;&gt;&gt; reduceChangeOutputs (DustThreshold 1) (Fee 4) (Coin &lt;$&gt; [2, 2, 2, 2])
-<span class="lineno">  427 </span>-- [Coin 4]
-<span class="lineno">  428 </span>--
-<span class="lineno">  429 </span>-- == Handling Insufficient Change
-<span class="lineno">  430 </span>--
-<span class="lineno">  431 </span>-- If there's not enough change to pay for the fee, or if there's only just
-<span class="lineno">  432 </span>-- enough to pay for it exactly, this function returns the /empty list/:
-<span class="lineno">  433 </span>--
-<span class="lineno">  434 </span>-- &gt;&gt;&gt; reduceChangeOutputs (DustThreshold 0) (Fee 15) (Coin &lt;$&gt; [10])
-<span class="lineno">  435 </span>-- []
-<span class="lineno">  436 </span>--
-<span class="lineno">  437 </span>-- &gt;&gt;&gt; reduceChangeOutputs (DustThreshold 0) (Fee 15) (Coin &lt;$&gt; [1, 2, 4, 8])
-<span class="lineno">  438 </span>-- []
-<span class="lineno">  439 </span>--
-<span class="lineno">  440 </span>reduceChangeOutputs
-<span class="lineno">  441 </span>    :: FeeOptions i o
-<span class="lineno">  442 </span>    -&gt; CoinSelection i o
-<span class="lineno">  443 </span>    -&gt; Either (FeeAdjustmentError i o) (CoinSelection i o, Fee)
-<span class="lineno">  444 </span><span class="decl"><span class="istickedoff">reduceChangeOutputs opts s = do</span>
-<span class="lineno">  445 </span><span class="spaces">    </span><span class="istickedoff">-- The original requested fee amount</span>
-<span class="lineno">  446 </span><span class="spaces">    </span><span class="istickedoff">let Fee φ_original = estimateFee (feeEstimator opts) s</span>
-<span class="lineno">  447 </span><span class="spaces">    </span><span class="istickedoff">-- The initial amount left for fee (i.e. inputs - outputs)</span>
-<span class="lineno">  448 </span><span class="spaces">    </span><span class="istickedoff">let mδ_original = sumInputs s `C.sub` (sumOutputs s `C.add` sumChange s)</span>
-<span class="lineno">  449 </span><span class="spaces">    </span><span class="istickedoff">case mδ_original of</span>
-<span class="lineno">  450 </span><span class="spaces">        </span><span class="istickedoff">-- selection is now balanced, nothing to do.</span>
-<span class="lineno">  451 </span><span class="spaces">        </span><span class="istickedoff">Just δ_original | φ_original == δ_original -&gt; do</span>
-<span class="lineno">  452 </span><span class="spaces">            </span><span class="istickedoff">pure (s, Fee C.zero)</span>
-<span class="lineno">  453 </span><span class="spaces"></span><span class="istickedoff"></span>
-<span class="lineno">  454 </span><span class="spaces">        </span><span class="istickedoff">-- some fee left to pay, but we've depleted all change outputs</span>
-<span class="lineno">  455 </span><span class="spaces">        </span><span class="istickedoff">Just δ_original | φ_original &gt; δ_original &amp;&amp; null (change s) -&gt; do</span>
-<span class="lineno">  456 </span><span class="spaces">            </span><span class="istickedoff">let remainder = φ_original `C.distance` δ_original</span>
-<span class="lineno">  457 </span><span class="spaces">            </span><span class="istickedoff">pure (s, Fee remainder)</span>
-<span class="lineno">  458 </span><span class="spaces"></span><span class="istickedoff"></span>
-<span class="lineno">  459 </span><span class="spaces">        </span><span class="istickedoff">-- some fee left to pay, and we've haven't depleted all change yet</span>
-<span class="lineno">  460 </span><span class="spaces">        </span><span class="istickedoff">Just δ_original | φ_original &gt; δ_original &amp;&amp; not (null (change s)) -&gt; do</span>
-<span class="lineno">  461 </span><span class="spaces">            </span><span class="istickedoff">let remainder = φ_original `C.distance` δ_original</span>
-<span class="lineno">  462 </span><span class="spaces">            </span><span class="istickedoff">let chgs' = distributeFee (Fee remainder) (NE.fromList (change s))</span>
-<span class="lineno">  463 </span><span class="spaces">                      </span><span class="istickedoff">&amp; fmap payFee</span>
-<span class="lineno">  464 </span><span class="spaces">                      </span><span class="istickedoff">&amp; coalesceDust (dustThreshold opts)</span>
-<span class="lineno">  465 </span><span class="spaces">            </span><span class="istickedoff">reduceChangeOutputs opts (s { change = chgs' })</span>
-<span class="lineno">  466 </span><span class="spaces"></span><span class="istickedoff"></span>
-<span class="lineno">  467 </span><span class="spaces">        </span><span class="istickedoff">-- The current selection has a higher fee than necessary. This typically</span>
-<span class="lineno">  468 </span><span class="spaces">        </span><span class="istickedoff">-- occurs if, after reducing an output to pay for the predicted fee, the</span>
-<span class="lineno">  469 </span><span class="spaces">        </span><span class="istickedoff">-- required fee turns out to be less than originally predicted.</span>
-<span class="lineno">  470 </span><span class="spaces">        </span><span class="istickedoff">-- The outcome depends on whether or not the node allows transactions</span>
-<span class="lineno">  471 </span><span class="spaces">        </span><span class="istickedoff">-- to be unbalanced.</span>
-<span class="lineno">  472 </span><span class="spaces">        </span><span class="istickedoff">Just δ_original | <span class="tickonlytrue">δ_original &gt; φ_original</span> -&gt; do</span>
-<span class="lineno">  473 </span><span class="spaces">            </span><span class="istickedoff">let extraChg = δ_original `C.distance` φ_original</span>
-<span class="lineno">  474 </span><span class="spaces">            </span><span class="istickedoff">let sDangling = s { change = splitCoin extraChg (change s) }</span>
-<span class="lineno">  475 </span><span class="spaces">            </span><span class="istickedoff">let Fee φ_dangling = estimateFee (feeEstimator opts) sDangling</span>
-<span class="lineno">  476 </span><span class="spaces">            </span><span class="istickedoff">-- We have `δ_dangling = φ_original` by construction of sDangling.</span>
-<span class="lineno">  477 </span><span class="spaces">            </span><span class="istickedoff">--</span>
-<span class="lineno">  478 </span><span class="spaces">            </span><span class="istickedoff">-- Proof:</span>
-<span class="lineno">  479 </span><span class="spaces">            </span><span class="istickedoff">--</span>
-<span class="lineno">  480 </span><span class="spaces">            </span><span class="istickedoff">-- δ_dangling = Σi_dangling - (Σo_dangling + Σc_dangling)</span>
-<span class="lineno">  481 </span><span class="spaces">            </span><span class="istickedoff">--            = Σi_original - (Σo_original + Σc_original + extraChg)</span>
-<span class="lineno">  482 </span><span class="spaces">            </span><span class="istickedoff">--            = Σi_original - (Σo_original + Σc_original) - extraChg</span>
-<span class="lineno">  483 </span><span class="spaces">            </span><span class="istickedoff">--            = δ_original - extraChg</span>
-<span class="lineno">  484 </span><span class="spaces">            </span><span class="istickedoff">--            = δ_original - (δ_original - φ_original)</span>
-<span class="lineno">  485 </span><span class="spaces">            </span><span class="istickedoff">--            = φ_original</span>
-<span class="lineno">  486 </span><span class="spaces">            </span><span class="istickedoff">let δ_dangling = φ_original</span>
-<span class="lineno">  487 </span><span class="spaces">            </span><span class="istickedoff">case φ_dangling `C.sub` δ_dangling of</span>
-<span class="lineno">  488 </span><span class="spaces">                </span><span class="istickedoff">-- we've left too much, but adding a change output would be more</span>
-<span class="lineno">  489 </span><span class="spaces">                </span><span class="istickedoff">-- expensive than not having it. Here we have two choices:</span>
-<span class="lineno">  490 </span><span class="spaces">                </span><span class="istickedoff">--</span>
-<span class="lineno">  491 </span><span class="spaces">                </span><span class="istickedoff">-- a) If the node allows unbalanced transaction, we can stop</span>
-<span class="lineno">  492 </span><span class="spaces">                </span><span class="istickedoff">--    here and do nothing. We'll leave slightly more than what's</span>
-<span class="lineno">  493 </span><span class="spaces">                </span><span class="istickedoff">--    needed for fees, but having an extra change output isn't</span>
-<span class="lineno">  494 </span><span class="spaces">                </span><span class="istickedoff">--    worth it anyway.</span>
-<span class="lineno">  495 </span><span class="spaces">                </span><span class="istickedoff">--</span>
-<span class="lineno">  496 </span><span class="spaces">                </span><span class="istickedoff">-- b) If we __must__ balance the transaction, then we can choose</span>
-<span class="lineno">  497 </span><span class="spaces">                </span><span class="istickedoff">--    to pay the extra cost by adding the change output and</span>
-<span class="lineno">  498 </span><span class="spaces">                </span><span class="istickedoff">--    continue trying to balance the transaction (likely, by</span>
-<span class="lineno">  499 </span><span class="spaces">                </span><span class="istickedoff">--    selecting another input).</span>
-<span class="lineno">  500 </span><span class="spaces">                </span><span class="istickedoff">Just remainder | φ_dangling &gt;= δ_original -&gt;</span>
-<span class="lineno">  501 </span><span class="spaces">                    </span><span class="istickedoff">case feeBalancingPolicy opts of</span>
-<span class="lineno">  502 </span><span class="spaces">                        </span><span class="istickedoff">RequireMinimalFee -&gt;</span>
-<span class="lineno">  503 </span><span class="spaces">                            </span><span class="istickedoff">pure (s, Fee C.zero)</span>
-<span class="lineno">  504 </span><span class="spaces">                        </span><span class="istickedoff">RequireBalancedFee -&gt;</span>
-<span class="lineno">  505 </span><span class="spaces">                            </span><span class="istickedoff">pure (sDangling, Fee remainder)</span>
-<span class="lineno">  506 </span><span class="spaces"></span><span class="istickedoff"></span>
-<span class="lineno">  507 </span><span class="spaces">                </span><span class="istickedoff">-- If however, adding the dangling change doesn't cost more than</span>
-<span class="lineno">  508 </span><span class="spaces">                </span><span class="istickedoff">-- not having it, we might as well add it to get the money and</span>
-<span class="lineno">  509 </span><span class="spaces">                </span><span class="istickedoff">-- continue balancing!</span>
-<span class="lineno">  510 </span><span class="spaces">                </span><span class="istickedoff">_otherwise -&gt;</span>
-<span class="lineno">  511 </span><span class="spaces">                    </span><span class="istickedoff">reduceChangeOutputs opts sDangling</span>
-<span class="lineno">  512 </span><span class="spaces"></span><span class="istickedoff"></span>
-<span class="lineno">  513 </span><span class="spaces">        </span><span class="istickedoff">-- The only way to end-up here is if the user has provided an invalid</span>
-<span class="lineno">  514 </span><span class="spaces">        </span><span class="istickedoff">-- selection where outputs are trying to spend more than inputs. This is</span>
-<span class="lineno">  515 </span><span class="spaces">        </span><span class="istickedoff">-- simply forbidden.</span>
-<span class="lineno">  516 </span><span class="spaces">        </span><span class="istickedoff">_Nothing -&gt;</span>
-<span class="lineno">  517 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">Left (CoinSelectionUnderfunded s)</span></span></span>
-<span class="lineno">  518 </span>
-<span class="lineno">  519 </span>-- Distribute the given fee over the given list of coins, so that each coin
-<span class="lineno">  520 </span>-- is allocated a __fraction__ of the fee in proportion to its relative size.
-<span class="lineno">  521 </span>--
-<span class="lineno">  522 </span>-- == Pre-condition
-<span class="lineno">  523 </span>--
-<span class="lineno">  524 </span>-- Every coin in the given list must be __non-zero__ in value.
+<span class="lineno">  341 </span>-- If the result is less than zero, returns 'Nothing'.
+<span class="lineno">  342 </span>--
+<span class="lineno">  343 </span>calculateFee :: CoinSelection i o -&gt; Maybe Fee
+<span class="lineno">  344 </span><span class="decl"><span class="nottickedoff">calculateFee s = Fee &lt;$&gt; sumInputs s `C.sub` (sumOutputs s `C.add` sumChange s)</span></span>
+<span class="lineno">  345 </span>
+<span class="lineno">  346 </span>-- The sender pays fee in this scenario, so fees are removed from the change
+<span class="lineno">  347 </span>-- outputs, and new inputs are selected if necessary.
+<span class="lineno">  348 </span>--
+<span class="lineno">  349 </span>senderPaysFee
+<span class="lineno">  350 </span>    :: forall i o m . (Ord i, MonadRandom m)
+<span class="lineno">  351 </span>    =&gt; FeeOptions i o
+<span class="lineno">  352 </span>    -&gt; CoinMap i
+<span class="lineno">  353 </span>    -&gt; CoinSelection i o
+<span class="lineno">  354 </span>    -&gt; ExceptT (FeeAdjustmentError i o) m (CoinSelection i o)
+<span class="lineno">  355 </span><span class="decl"><span class="istickedoff">senderPaysFee opts utxo sel =</span>
+<span class="lineno">  356 </span><span class="spaces">    </span><span class="istickedoff">evalStateT (go sel) utxo</span>
+<span class="lineno">  357 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  358 </span><span class="spaces">    </span><span class="istickedoff">go</span>
+<span class="lineno">  359 </span><span class="spaces">        </span><span class="istickedoff">:: CoinSelection i o</span>
+<span class="lineno">  360 </span><span class="spaces">        </span><span class="istickedoff">-&gt; StateT</span>
+<span class="lineno">  361 </span><span class="spaces">            </span><span class="istickedoff">(CoinMap i)</span>
+<span class="lineno">  362 </span><span class="spaces">            </span><span class="istickedoff">(ExceptT (FeeAdjustmentError i o) m)</span>
+<span class="lineno">  363 </span><span class="spaces">            </span><span class="istickedoff">(CoinSelection i o)</span>
+<span class="lineno">  364 </span><span class="spaces">    </span><span class="istickedoff">go coinSel@(CoinSelection inps outs chgs) = do</span>
+<span class="lineno">  365 </span><span class="spaces">        </span><span class="istickedoff">-- Substract fee from change outputs, proportionally to their value.</span>
+<span class="lineno">  366 </span><span class="spaces">        </span><span class="istickedoff">(coinSel', remFee) &lt;- lift $ except $ reduceChangeOutputs opts coinSel</span>
+<span class="lineno">  367 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  368 </span><span class="spaces">        </span><span class="istickedoff">-- Should the change cover the fee, we're (almost) good. By removing</span>
+<span class="lineno">  369 </span><span class="spaces">        </span><span class="istickedoff">-- change outputs, we make them smaller and may reduce the size of the</span>
+<span class="lineno">  370 </span><span class="spaces">        </span><span class="istickedoff">-- transaction, and the fee. Thus, we end up paying slightly more than</span>
+<span class="lineno">  371 </span><span class="spaces">        </span><span class="istickedoff">-- the upper bound. We could do some binary search and try to</span>
+<span class="lineno">  372 </span><span class="spaces">        </span><span class="istickedoff">-- re-distribute excess across changes until fee becomes bigger.</span>
+<span class="lineno">  373 </span><span class="spaces">        </span><span class="istickedoff">if remFee == Fee C.zero</span>
+<span class="lineno">  374 </span><span class="spaces">        </span><span class="istickedoff">then pure coinSel'</span>
+<span class="lineno">  375 </span><span class="spaces">        </span><span class="istickedoff">else do</span>
+<span class="lineno">  376 </span><span class="spaces">            </span><span class="istickedoff">-- Otherwise, we need an extra entries from the available utxo to</span>
+<span class="lineno">  377 </span><span class="spaces">            </span><span class="istickedoff">-- cover what's left. Note that this entry may increase our change</span>
+<span class="lineno">  378 </span><span class="spaces">            </span><span class="istickedoff">-- because we may not consume it entirely. So we will just split</span>
+<span class="lineno">  379 </span><span class="spaces">            </span><span class="istickedoff">-- the extra change across all changes possibly increasing the</span>
+<span class="lineno">  380 </span><span class="spaces">            </span><span class="istickedoff">-- number of change outputs (if there was none, or if increasing a</span>
+<span class="lineno">  381 </span><span class="spaces">            </span><span class="istickedoff">-- change value causes an overflow).</span>
+<span class="lineno">  382 </span><span class="spaces">            </span><span class="istickedoff">--</span>
+<span class="lineno">  383 </span><span class="spaces">            </span><span class="istickedoff">-- Because selecting a new input increases the fee, we need to</span>
+<span class="lineno">  384 </span><span class="spaces">            </span><span class="istickedoff">-- re-run the algorithm with this new elements and using the initial</span>
+<span class="lineno">  385 </span><span class="spaces">            </span><span class="istickedoff">-- change plus the extra change brought up by this entry and see if</span>
+<span class="lineno">  386 </span><span class="spaces">            </span><span class="istickedoff">-- we can now correctly cover fee.</span>
+<span class="lineno">  387 </span><span class="spaces">            </span><span class="istickedoff">inps' &lt;- coverRemainingFee remFee</span>
+<span class="lineno">  388 </span><span class="spaces">            </span><span class="istickedoff">let extraChange = splitCoin (sumEntries inps') chgs</span>
+<span class="lineno">  389 </span><span class="spaces">            </span><span class="istickedoff">go $ CoinSelection (inps &lt;&gt; coinMapFromList inps') outs extraChange</span></span>
+<span class="lineno">  390 </span>
+<span class="lineno">  391 </span>-- A short and simple version of the 'random' fee policy to cover for the fee
+<span class="lineno">  392 </span>-- in the case where existing set of change is not enough.
+<span class="lineno">  393 </span>--
+<span class="lineno">  394 </span>coverRemainingFee
+<span class="lineno">  395 </span>    :: MonadRandom m
+<span class="lineno">  396 </span>    =&gt; Fee
+<span class="lineno">  397 </span>    -&gt; StateT (CoinMap i) (ExceptT (FeeAdjustmentError i o) m) [CoinMapEntry i]
+<span class="lineno">  398 </span><span class="decl"><span class="istickedoff">coverRemainingFee (Fee fee) = go [] where</span>
+<span class="lineno">  399 </span><span class="spaces">    </span><span class="istickedoff">go acc</span>
+<span class="lineno">  400 </span><span class="spaces">        </span><span class="istickedoff">| sumEntries acc &gt;= fee =</span>
+<span class="lineno">  401 </span><span class="spaces">            </span><span class="istickedoff">return acc</span>
+<span class="lineno">  402 </span><span class="spaces">        </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span> = do</span>
+<span class="lineno">  403 </span><span class="spaces">            </span><span class="istickedoff">-- We ignore the size of the fee, and just pick randomly</span>
+<span class="lineno">  404 </span><span class="spaces">            </span><span class="istickedoff">StateT (lift . selectRandomEntry) &gt;&gt;= \case</span>
+<span class="lineno">  405 </span><span class="spaces">                </span><span class="istickedoff">Just entry -&gt;</span>
+<span class="lineno">  406 </span><span class="spaces">                    </span><span class="istickedoff">go (entry : acc)</span>
+<span class="lineno">  407 </span><span class="spaces">                </span><span class="istickedoff">Nothing -&gt;</span>
+<span class="lineno">  408 </span><span class="spaces">                    </span><span class="istickedoff">lift $ throwE $ CannotCoverFee $ Fee $</span>
+<span class="lineno">  409 </span><span class="spaces">                        </span><span class="istickedoff">fee `C.distance` (sumEntries acc)</span>
+<span class="lineno">  410 </span><span class="spaces">    </span><span class="istickedoff">selectRandomEntry m =</span>
+<span class="lineno">  411 </span><span class="spaces">        </span><span class="istickedoff">maybe (Nothing, <span class="nottickedoff">m</span>) (first Just) &lt;$&gt; coinMapRandomEntry m</span></span>
+<span class="lineno">  412 </span>
+<span class="lineno">  413 </span>-- Pays for the given fee by subtracting it from the given list of change
+<span class="lineno">  414 </span>-- outputs, so that each change output is reduced by a portion of the fee
+<span class="lineno">  415 </span>-- that's in proportion to its relative size.
+<span class="lineno">  416 </span>--
+<span class="lineno">  417 </span>-- == Basic Examples
+<span class="lineno">  418 </span>--
+<span class="lineno">  419 </span>-- &gt;&gt;&gt; reduceChangeOutputs (DustThreshold 0) (Fee 4) (Coin &lt;$&gt; [2, 2, 2, 2])
+<span class="lineno">  420 </span>-- [Coin 1, Coin 1, Coin 1, Coin 1]
+<span class="lineno">  421 </span>--
+<span class="lineno">  422 </span>-- &gt;&gt;&gt; reduceChangeOutputs (DustThreshold 0) (Fee 15) (Coin &lt;$&gt; [2, 4, 8, 16])
+<span class="lineno">  423 </span>-- [Coin 1, Coin 2, Coin 4, Coin 8]
+<span class="lineno">  424 </span>--
+<span class="lineno">  425 </span>-- == Handling Dust
+<span class="lineno">  426 </span>--
+<span class="lineno">  427 </span>-- Any dust outputs in the resulting list are coalesced according to the given
+<span class="lineno">  428 </span>-- dust threshold: (See 'coalesceDust'.)
+<span class="lineno">  429 </span>--
+<span class="lineno">  430 </span>-- &gt;&gt;&gt; reduceChangeOutputs (DustThreshold 1) (Fee 4) (Coin &lt;$&gt; [2, 2, 2, 2])
+<span class="lineno">  431 </span>-- [Coin 4]
+<span class="lineno">  432 </span>--
+<span class="lineno">  433 </span>-- == Handling Insufficient Change
+<span class="lineno">  434 </span>--
+<span class="lineno">  435 </span>-- If there's not enough change to pay for the fee, or if there's only just
+<span class="lineno">  436 </span>-- enough to pay for it exactly, this function returns the /empty list/:
+<span class="lineno">  437 </span>--
+<span class="lineno">  438 </span>-- &gt;&gt;&gt; reduceChangeOutputs (DustThreshold 0) (Fee 15) (Coin &lt;$&gt; [10])
+<span class="lineno">  439 </span>-- []
+<span class="lineno">  440 </span>--
+<span class="lineno">  441 </span>-- &gt;&gt;&gt; reduceChangeOutputs (DustThreshold 0) (Fee 15) (Coin &lt;$&gt; [1, 2, 4, 8])
+<span class="lineno">  442 </span>-- []
+<span class="lineno">  443 </span>--
+<span class="lineno">  444 </span>reduceChangeOutputs
+<span class="lineno">  445 </span>    :: FeeOptions i o
+<span class="lineno">  446 </span>    -&gt; CoinSelection i o
+<span class="lineno">  447 </span>    -&gt; Either (FeeAdjustmentError i o) (CoinSelection i o, Fee)
+<span class="lineno">  448 </span><span class="decl"><span class="istickedoff">reduceChangeOutputs opts s = do</span>
+<span class="lineno">  449 </span><span class="spaces">    </span><span class="istickedoff">-- The original requested fee amount</span>
+<span class="lineno">  450 </span><span class="spaces">    </span><span class="istickedoff">let Fee φ_original = estimateFee (feeEstimator opts) s</span>
+<span class="lineno">  451 </span><span class="spaces">    </span><span class="istickedoff">-- The initial amount left for fee (i.e. inputs - outputs)</span>
+<span class="lineno">  452 </span><span class="spaces">    </span><span class="istickedoff">let mδ_original = sumInputs s `C.sub` (sumOutputs s `C.add` sumChange s)</span>
+<span class="lineno">  453 </span><span class="spaces">    </span><span class="istickedoff">case mδ_original of</span>
+<span class="lineno">  454 </span><span class="spaces">        </span><span class="istickedoff">-- selection is now balanced, nothing to do.</span>
+<span class="lineno">  455 </span><span class="spaces">        </span><span class="istickedoff">Just δ_original | φ_original == δ_original -&gt; do</span>
+<span class="lineno">  456 </span><span class="spaces">            </span><span class="istickedoff">pure (s, Fee C.zero)</span>
+<span class="lineno">  457 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  458 </span><span class="spaces">        </span><span class="istickedoff">-- some fee left to pay, but we've depleted all change outputs</span>
+<span class="lineno">  459 </span><span class="spaces">        </span><span class="istickedoff">Just δ_original | φ_original &gt; δ_original &amp;&amp; null (change s) -&gt; do</span>
+<span class="lineno">  460 </span><span class="spaces">            </span><span class="istickedoff">let remainder = φ_original `C.distance` δ_original</span>
+<span class="lineno">  461 </span><span class="spaces">            </span><span class="istickedoff">pure (s, Fee remainder)</span>
+<span class="lineno">  462 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  463 </span><span class="spaces">        </span><span class="istickedoff">-- some fee left to pay, and we've haven't depleted all change yet</span>
+<span class="lineno">  464 </span><span class="spaces">        </span><span class="istickedoff">Just δ_original | φ_original &gt; δ_original &amp;&amp; not (null (change s)) -&gt; do</span>
+<span class="lineno">  465 </span><span class="spaces">            </span><span class="istickedoff">let remainder = φ_original `C.distance` δ_original</span>
+<span class="lineno">  466 </span><span class="spaces">            </span><span class="istickedoff">let chgs' = distributeFee (Fee remainder) (NE.fromList (change s))</span>
+<span class="lineno">  467 </span><span class="spaces">                      </span><span class="istickedoff">&amp; fmap payFee</span>
+<span class="lineno">  468 </span><span class="spaces">                      </span><span class="istickedoff">&amp; coalesceDust (dustThreshold opts)</span>
+<span class="lineno">  469 </span><span class="spaces">            </span><span class="istickedoff">reduceChangeOutputs opts (s { change = chgs' })</span>
+<span class="lineno">  470 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  471 </span><span class="spaces">        </span><span class="istickedoff">-- The current selection has a higher fee than necessary. This typically</span>
+<span class="lineno">  472 </span><span class="spaces">        </span><span class="istickedoff">-- occurs if, after reducing an output to pay for the predicted fee, the</span>
+<span class="lineno">  473 </span><span class="spaces">        </span><span class="istickedoff">-- required fee turns out to be less than originally predicted.</span>
+<span class="lineno">  474 </span><span class="spaces">        </span><span class="istickedoff">-- The outcome depends on whether or not the node allows transactions</span>
+<span class="lineno">  475 </span><span class="spaces">        </span><span class="istickedoff">-- to be unbalanced.</span>
+<span class="lineno">  476 </span><span class="spaces">        </span><span class="istickedoff">Just δ_original | <span class="tickonlytrue">δ_original &gt; φ_original</span> -&gt; do</span>
+<span class="lineno">  477 </span><span class="spaces">            </span><span class="istickedoff">let extraChg = δ_original `C.distance` φ_original</span>
+<span class="lineno">  478 </span><span class="spaces">            </span><span class="istickedoff">let sDangling = s { change = splitCoin extraChg (change s) }</span>
+<span class="lineno">  479 </span><span class="spaces">            </span><span class="istickedoff">let Fee φ_dangling = estimateFee (feeEstimator opts) sDangling</span>
+<span class="lineno">  480 </span><span class="spaces">            </span><span class="istickedoff">-- We have `δ_dangling = φ_original` by construction of sDangling.</span>
+<span class="lineno">  481 </span><span class="spaces">            </span><span class="istickedoff">--</span>
+<span class="lineno">  482 </span><span class="spaces">            </span><span class="istickedoff">-- Proof:</span>
+<span class="lineno">  483 </span><span class="spaces">            </span><span class="istickedoff">--</span>
+<span class="lineno">  484 </span><span class="spaces">            </span><span class="istickedoff">-- δ_dangling = Σi_dangling - (Σo_dangling + Σc_dangling)</span>
+<span class="lineno">  485 </span><span class="spaces">            </span><span class="istickedoff">--            = Σi_original - (Σo_original + Σc_original + extraChg)</span>
+<span class="lineno">  486 </span><span class="spaces">            </span><span class="istickedoff">--            = Σi_original - (Σo_original + Σc_original) - extraChg</span>
+<span class="lineno">  487 </span><span class="spaces">            </span><span class="istickedoff">--            = δ_original - extraChg</span>
+<span class="lineno">  488 </span><span class="spaces">            </span><span class="istickedoff">--            = δ_original - (δ_original - φ_original)</span>
+<span class="lineno">  489 </span><span class="spaces">            </span><span class="istickedoff">--            = φ_original</span>
+<span class="lineno">  490 </span><span class="spaces">            </span><span class="istickedoff">let δ_dangling = φ_original</span>
+<span class="lineno">  491 </span><span class="spaces">            </span><span class="istickedoff">case φ_dangling `C.sub` δ_dangling of</span>
+<span class="lineno">  492 </span><span class="spaces">                </span><span class="istickedoff">-- we've left too much, but adding a change output would be more</span>
+<span class="lineno">  493 </span><span class="spaces">                </span><span class="istickedoff">-- expensive than not having it. Here we have two choices:</span>
+<span class="lineno">  494 </span><span class="spaces">                </span><span class="istickedoff">--</span>
+<span class="lineno">  495 </span><span class="spaces">                </span><span class="istickedoff">-- a) If the node allows unbalanced transaction, we can stop</span>
+<span class="lineno">  496 </span><span class="spaces">                </span><span class="istickedoff">--    here and do nothing. We'll leave slightly more than what's</span>
+<span class="lineno">  497 </span><span class="spaces">                </span><span class="istickedoff">--    needed for fees, but having an extra change output isn't</span>
+<span class="lineno">  498 </span><span class="spaces">                </span><span class="istickedoff">--    worth it anyway.</span>
+<span class="lineno">  499 </span><span class="spaces">                </span><span class="istickedoff">--</span>
+<span class="lineno">  500 </span><span class="spaces">                </span><span class="istickedoff">-- b) If we __must__ balance the transaction, then we can choose</span>
+<span class="lineno">  501 </span><span class="spaces">                </span><span class="istickedoff">--    to pay the extra cost by adding the change output and</span>
+<span class="lineno">  502 </span><span class="spaces">                </span><span class="istickedoff">--    continue trying to balance the transaction (likely, by</span>
+<span class="lineno">  503 </span><span class="spaces">                </span><span class="istickedoff">--    selecting another input).</span>
+<span class="lineno">  504 </span><span class="spaces">                </span><span class="istickedoff">Just remainder | φ_dangling &gt;= δ_original -&gt;</span>
+<span class="lineno">  505 </span><span class="spaces">                    </span><span class="istickedoff">case feeBalancingPolicy opts of</span>
+<span class="lineno">  506 </span><span class="spaces">                        </span><span class="istickedoff">RequireMinimalFee -&gt;</span>
+<span class="lineno">  507 </span><span class="spaces">                            </span><span class="istickedoff">pure (s, Fee C.zero)</span>
+<span class="lineno">  508 </span><span class="spaces">                        </span><span class="istickedoff">RequireBalancedFee -&gt;</span>
+<span class="lineno">  509 </span><span class="spaces">                            </span><span class="istickedoff">pure (sDangling, Fee remainder)</span>
+<span class="lineno">  510 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  511 </span><span class="spaces">                </span><span class="istickedoff">-- If however, adding the dangling change doesn't cost more than</span>
+<span class="lineno">  512 </span><span class="spaces">                </span><span class="istickedoff">-- not having it, we might as well add it to get the money and</span>
+<span class="lineno">  513 </span><span class="spaces">                </span><span class="istickedoff">-- continue balancing!</span>
+<span class="lineno">  514 </span><span class="spaces">                </span><span class="istickedoff">_otherwise -&gt;</span>
+<span class="lineno">  515 </span><span class="spaces">                    </span><span class="istickedoff">reduceChangeOutputs opts sDangling</span>
+<span class="lineno">  516 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  517 </span><span class="spaces">        </span><span class="istickedoff">-- The only way to end-up here is if the user has provided an invalid</span>
+<span class="lineno">  518 </span><span class="spaces">        </span><span class="istickedoff">-- selection where outputs are trying to spend more than inputs. This is</span>
+<span class="lineno">  519 </span><span class="spaces">        </span><span class="istickedoff">-- simply forbidden.</span>
+<span class="lineno">  520 </span><span class="spaces">        </span><span class="istickedoff">_Nothing -&gt;</span>
+<span class="lineno">  521 </span><span class="spaces">            </span><span class="istickedoff"><span class="nottickedoff">Left (CoinSelectionUnderfunded s)</span></span></span>
+<span class="lineno">  522 </span>
+<span class="lineno">  523 </span>-- Distribute the given fee over the given list of coins, so that each coin
+<span class="lineno">  524 </span>-- is allocated a __fraction__ of the fee in proportion to its relative size.
 <span class="lineno">  525 </span>--
-<span class="lineno">  526 </span>-- == Examples
+<span class="lineno">  526 </span>-- == Pre-condition
 <span class="lineno">  527 </span>--
-<span class="lineno">  528 </span>-- &gt;&gt;&gt; distributeFee (Fee 2) [(Coin 1), (Coin 1)]
-<span class="lineno">  529 </span>-- [(Fee 1, Coin 1), (Fee 1, Coin 1)]
-<span class="lineno">  530 </span>--
-<span class="lineno">  531 </span>-- &gt;&gt;&gt; distributeFee (Fee 4) [(Coin 1), (Coin 1)]
-<span class="lineno">  532 </span>-- [(Fee 2, Coin 1), (Fee 2, Coin 1)]
-<span class="lineno">  533 </span>--
-<span class="lineno">  534 </span>-- &gt;&gt;&gt; distributeFee (Fee 7) [(Coin 1), (Coin 2), (Coin 4)]
-<span class="lineno">  535 </span>-- [(Fee 1, Coin 1), (Fee 2, Coin 2), (Fee 4, Coin 4)]
-<span class="lineno">  536 </span>--
-<span class="lineno">  537 </span>-- &gt;&gt;&gt; distributeFee (Fee 14) [(Coin 1), (Coin 2), (Coin 4)]
-<span class="lineno">  538 </span>-- [(Fee 2, Coin 1), (Fee 4, Coin 2), (Fee 8, Coin 4)]
-<span class="lineno">  539 </span>--
-<span class="lineno">  540 </span>distributeFee :: Fee -&gt; NonEmpty Coin -&gt; NonEmpty (Fee, Coin)
-<span class="lineno">  541 </span><span class="decl"><span class="istickedoff">distributeFee (Fee feeTotal) coinsUnsafe =</span>
-<span class="lineno">  542 </span><span class="spaces">    </span><span class="istickedoff">NE.zip feesRounded coins</span>
-<span class="lineno">  543 </span><span class="spaces">  </span><span class="istickedoff">where</span>
-<span class="lineno">  544 </span><span class="spaces">    </span><span class="istickedoff">-- A list of coins that are non-zero in value.</span>
-<span class="lineno">  545 </span><span class="spaces">    </span><span class="istickedoff">coins :: NonEmpty Coin</span>
-<span class="lineno">  546 </span><span class="spaces">    </span><span class="istickedoff">coins =</span>
-<span class="lineno">  547 </span><span class="spaces">        </span><span class="istickedoff">invariant <span class="nottickedoff">&quot;distributeFee: all coins must be non-zero in value.&quot;</span></span>
-<span class="lineno">  548 </span><span class="spaces">        </span><span class="istickedoff">coinsUnsafe (C.zero `F.notElem`)</span>
-<span class="lineno">  549 </span><span class="spaces"></span><span class="istickedoff"></span>
-<span class="lineno">  550 </span><span class="spaces">    </span><span class="istickedoff">-- A list of rounded fee portions, where each fee portion deviates from the</span>
-<span class="lineno">  551 </span><span class="spaces">    </span><span class="istickedoff">-- ideal unrounded portion by as small an amount as possible.</span>
-<span class="lineno">  552 </span><span class="spaces">    </span><span class="istickedoff">feesRounded :: NonEmpty Fee</span>
-<span class="lineno">  553 </span><span class="spaces">    </span><span class="istickedoff">feesRounded</span>
-<span class="lineno">  554 </span><span class="spaces">        </span><span class="istickedoff">-- 1. Start with the list of ideal unrounded fee portions for each coin:</span>
-<span class="lineno">  555 </span><span class="spaces">        </span><span class="istickedoff">= feesUnrounded</span>
-<span class="lineno">  556 </span><span class="spaces">        </span><span class="istickedoff">-- 2. Attach an index to each fee portion, so that we can remember the</span>
-<span class="lineno">  557 </span><span class="spaces">        </span><span class="istickedoff">--    original order:</span>
-<span class="lineno">  558 </span><span class="spaces">        </span><span class="istickedoff">&amp; NE.zip indices</span>
-<span class="lineno">  559 </span><span class="spaces">        </span><span class="istickedoff">-- 3. Sort the fees into descending order of their fractional parts:</span>
-<span class="lineno">  560 </span><span class="spaces">        </span><span class="istickedoff">&amp; NE.sortBy (comparing (Down . fractionalPart . snd))</span>
-<span class="lineno">  561 </span><span class="spaces">        </span><span class="istickedoff">-- 4. Apply pre-computed roundings to each fee portion:</span>
-<span class="lineno">  562 </span><span class="spaces">        </span><span class="istickedoff">--    * portions with the greatest fractional parts are rounded up;</span>
-<span class="lineno">  563 </span><span class="spaces">        </span><span class="istickedoff">--    * portions with the smallest fractional parts are rounded down.</span>
-<span class="lineno">  564 </span><span class="spaces">        </span><span class="istickedoff">&amp; NE.zipWith (\roundDir (i, f) -&gt; (i, round roundDir f)) feeRoundings</span>
-<span class="lineno">  565 </span><span class="spaces">        </span><span class="istickedoff">-- 5. Restore the original order:</span>
-<span class="lineno">  566 </span><span class="spaces">        </span><span class="istickedoff">&amp; NE.sortBy (comparing fst)</span>
-<span class="lineno">  567 </span><span class="spaces">        </span><span class="istickedoff">-- 6. Strip away the indices:</span>
-<span class="lineno">  568 </span><span class="spaces">        </span><span class="istickedoff">&amp; fmap snd</span>
-<span class="lineno">  569 </span><span class="spaces">        </span><span class="istickedoff">-- 7. Transform results into fees:</span>
-<span class="lineno">  570 </span><span class="spaces">        </span><span class="istickedoff">&amp; fmap (Fee . fromMaybe <span class="nottickedoff">C.zero</span> . C.coinFromIntegral @Integer)</span>
-<span class="lineno">  571 </span><span class="spaces">      </span><span class="istickedoff">where</span>
-<span class="lineno">  572 </span><span class="spaces">        </span><span class="istickedoff">indices :: NonEmpty Int</span>
-<span class="lineno">  573 </span><span class="spaces">        </span><span class="istickedoff">indices = 0 :| [1 ..]</span>
-<span class="lineno">  574 </span><span class="spaces"></span><span class="istickedoff"></span>
-<span class="lineno">  575 </span><span class="spaces">    </span><span class="istickedoff">-- A list of rounding directions, one per fee portion.</span>
-<span class="lineno">  576 </span><span class="spaces">    </span><span class="istickedoff">--</span>
-<span class="lineno">  577 </span><span class="spaces">    </span><span class="istickedoff">-- Since the ideal fee portion for each coin is a rational value, we must</span>
-<span class="lineno">  578 </span><span class="spaces">    </span><span class="istickedoff">-- therefore round each rational value either /up/ or /down/ to produce a</span>
-<span class="lineno">  579 </span><span class="spaces">    </span><span class="istickedoff">-- final integer result.</span>
+<span class="lineno">  528 </span>-- Every coin in the given list must be __non-zero__ in value.
+<span class="lineno">  529 </span>--
+<span class="lineno">  530 </span>-- == Examples
+<span class="lineno">  531 </span>--
+<span class="lineno">  532 </span>-- &gt;&gt;&gt; distributeFee (Fee 2) [(Coin 1), (Coin 1)]
+<span class="lineno">  533 </span>-- [(Fee 1, Coin 1), (Fee 1, Coin 1)]
+<span class="lineno">  534 </span>--
+<span class="lineno">  535 </span>-- &gt;&gt;&gt; distributeFee (Fee 4) [(Coin 1), (Coin 1)]
+<span class="lineno">  536 </span>-- [(Fee 2, Coin 1), (Fee 2, Coin 1)]
+<span class="lineno">  537 </span>--
+<span class="lineno">  538 </span>-- &gt;&gt;&gt; distributeFee (Fee 7) [(Coin 1), (Coin 2), (Coin 4)]
+<span class="lineno">  539 </span>-- [(Fee 1, Coin 1), (Fee 2, Coin 2), (Fee 4, Coin 4)]
+<span class="lineno">  540 </span>--
+<span class="lineno">  541 </span>-- &gt;&gt;&gt; distributeFee (Fee 14) [(Coin 1), (Coin 2), (Coin 4)]
+<span class="lineno">  542 </span>-- [(Fee 2, Coin 1), (Fee 4, Coin 2), (Fee 8, Coin 4)]
+<span class="lineno">  543 </span>--
+<span class="lineno">  544 </span>distributeFee :: Fee -&gt; NonEmpty Coin -&gt; NonEmpty (Fee, Coin)
+<span class="lineno">  545 </span><span class="decl"><span class="istickedoff">distributeFee (Fee feeTotal) coinsUnsafe =</span>
+<span class="lineno">  546 </span><span class="spaces">    </span><span class="istickedoff">NE.zip feesRounded coins</span>
+<span class="lineno">  547 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  548 </span><span class="spaces">    </span><span class="istickedoff">-- A list of coins that are non-zero in value.</span>
+<span class="lineno">  549 </span><span class="spaces">    </span><span class="istickedoff">coins :: NonEmpty Coin</span>
+<span class="lineno">  550 </span><span class="spaces">    </span><span class="istickedoff">coins =</span>
+<span class="lineno">  551 </span><span class="spaces">        </span><span class="istickedoff">invariant <span class="nottickedoff">&quot;distributeFee: all coins must be non-zero in value.&quot;</span></span>
+<span class="lineno">  552 </span><span class="spaces">        </span><span class="istickedoff">coinsUnsafe (C.zero `F.notElem`)</span>
+<span class="lineno">  553 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  554 </span><span class="spaces">    </span><span class="istickedoff">-- A list of rounded fee portions, where each fee portion deviates from the</span>
+<span class="lineno">  555 </span><span class="spaces">    </span><span class="istickedoff">-- ideal unrounded portion by as small an amount as possible.</span>
+<span class="lineno">  556 </span><span class="spaces">    </span><span class="istickedoff">feesRounded :: NonEmpty Fee</span>
+<span class="lineno">  557 </span><span class="spaces">    </span><span class="istickedoff">feesRounded</span>
+<span class="lineno">  558 </span><span class="spaces">        </span><span class="istickedoff">-- 1. Start with the list of ideal unrounded fee portions for each coin:</span>
+<span class="lineno">  559 </span><span class="spaces">        </span><span class="istickedoff">= feesUnrounded</span>
+<span class="lineno">  560 </span><span class="spaces">        </span><span class="istickedoff">-- 2. Attach an index to each fee portion, so that we can remember the</span>
+<span class="lineno">  561 </span><span class="spaces">        </span><span class="istickedoff">--    original order:</span>
+<span class="lineno">  562 </span><span class="spaces">        </span><span class="istickedoff">&amp; NE.zip indices</span>
+<span class="lineno">  563 </span><span class="spaces">        </span><span class="istickedoff">-- 3. Sort the fees into descending order of their fractional parts:</span>
+<span class="lineno">  564 </span><span class="spaces">        </span><span class="istickedoff">&amp; NE.sortBy (comparing (Down . fractionalPart . snd))</span>
+<span class="lineno">  565 </span><span class="spaces">        </span><span class="istickedoff">-- 4. Apply pre-computed roundings to each fee portion:</span>
+<span class="lineno">  566 </span><span class="spaces">        </span><span class="istickedoff">--    * portions with the greatest fractional parts are rounded up;</span>
+<span class="lineno">  567 </span><span class="spaces">        </span><span class="istickedoff">--    * portions with the smallest fractional parts are rounded down.</span>
+<span class="lineno">  568 </span><span class="spaces">        </span><span class="istickedoff">&amp; NE.zipWith (\roundDir (i, f) -&gt; (i, round roundDir f)) feeRoundings</span>
+<span class="lineno">  569 </span><span class="spaces">        </span><span class="istickedoff">-- 5. Restore the original order:</span>
+<span class="lineno">  570 </span><span class="spaces">        </span><span class="istickedoff">&amp; NE.sortBy (comparing fst)</span>
+<span class="lineno">  571 </span><span class="spaces">        </span><span class="istickedoff">-- 6. Strip away the indices:</span>
+<span class="lineno">  572 </span><span class="spaces">        </span><span class="istickedoff">&amp; fmap snd</span>
+<span class="lineno">  573 </span><span class="spaces">        </span><span class="istickedoff">-- 7. Transform results into fees:</span>
+<span class="lineno">  574 </span><span class="spaces">        </span><span class="istickedoff">&amp; fmap (Fee . fromMaybe <span class="nottickedoff">C.zero</span> . C.coinFromIntegral @Integer)</span>
+<span class="lineno">  575 </span><span class="spaces">      </span><span class="istickedoff">where</span>
+<span class="lineno">  576 </span><span class="spaces">        </span><span class="istickedoff">indices :: NonEmpty Int</span>
+<span class="lineno">  577 </span><span class="spaces">        </span><span class="istickedoff">indices = 0 :| [1 ..]</span>
+<span class="lineno">  578 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  579 </span><span class="spaces">    </span><span class="istickedoff">-- A list of rounding directions, one per fee portion.</span>
 <span class="lineno">  580 </span><span class="spaces">    </span><span class="istickedoff">--</span>
-<span class="lineno">  581 </span><span class="spaces">    </span><span class="istickedoff">-- However, we can't take the simple approach of either rounding /all/ fee</span>
-<span class="lineno">  582 </span><span class="spaces">    </span><span class="istickedoff">-- portions down or rounding /all/ fee portions up, as this could cause the</span>
-<span class="lineno">  583 </span><span class="spaces">    </span><span class="istickedoff">-- sum of fee portions to either undershoot or overshoot the original fee.</span>
+<span class="lineno">  581 </span><span class="spaces">    </span><span class="istickedoff">-- Since the ideal fee portion for each coin is a rational value, we must</span>
+<span class="lineno">  582 </span><span class="spaces">    </span><span class="istickedoff">-- therefore round each rational value either /up/ or /down/ to produce a</span>
+<span class="lineno">  583 </span><span class="spaces">    </span><span class="istickedoff">-- final integer result.</span>
 <span class="lineno">  584 </span><span class="spaces">    </span><span class="istickedoff">--</span>
-<span class="lineno">  585 </span><span class="spaces">    </span><span class="istickedoff">-- So in order to hit the fee exactly, we must round /some/ of the portions</span>
-<span class="lineno">  586 </span><span class="spaces">    </span><span class="istickedoff">-- up, and /some/ of the portions down.</span>
-<span class="lineno">  587 </span><span class="spaces">    </span><span class="istickedoff">--</span>
-<span class="lineno">  588 </span><span class="spaces">    </span><span class="istickedoff">-- Fortunately, we can calculate exactly how many fee portions must be</span>
-<span class="lineno">  589 </span><span class="spaces">    </span><span class="istickedoff">-- rounded up, by first rounding /all/ portions down, and then computing</span>
-<span class="lineno">  590 </span><span class="spaces">    </span><span class="istickedoff">-- the /shortfall/ between the sum of the rounded-down portions and the</span>
-<span class="lineno">  591 </span><span class="spaces">    </span><span class="istickedoff">-- original fee.</span>
-<span class="lineno">  592 </span><span class="spaces">    </span><span class="istickedoff">--</span>
-<span class="lineno">  593 </span><span class="spaces">    </span><span class="istickedoff">-- We return a list where all values of 'RoundUp' occur in a contiguous</span>
-<span class="lineno">  594 </span><span class="spaces">    </span><span class="istickedoff">-- section at the start of the list, of the following form:</span>
-<span class="lineno">  595 </span><span class="spaces">    </span><span class="istickedoff">--</span>
-<span class="lineno">  596 </span><span class="spaces">    </span><span class="istickedoff">--     [RoundUp, RoundUp, ..., RoundDown, RoundDown, ...]</span>
-<span class="lineno">  597 </span><span class="spaces">    </span><span class="istickedoff">--</span>
-<span class="lineno">  598 </span><span class="spaces">    </span><span class="istickedoff">feeRoundings :: NonEmpty RoundingDirection</span>
-<span class="lineno">  599 </span><span class="spaces">    </span><span class="istickedoff">feeRoundings =</span>
-<span class="lineno">  600 </span><span class="spaces">        </span><span class="istickedoff">applyN feeShortfall (NE.cons RoundUp) (NE.repeat RoundDown)</span>
-<span class="lineno">  601 </span><span class="spaces">      </span><span class="istickedoff">where</span>
-<span class="lineno">  602 </span><span class="spaces">         </span><span class="istickedoff">-- The part of the total fee that we'd lose if we were to take the</span>
-<span class="lineno">  603 </span><span class="spaces">         </span><span class="istickedoff">-- simple approach of rounding all ideal fee portions /down/.</span>
-<span class="lineno">  604 </span><span class="spaces">        </span><span class="istickedoff">feeShortfall</span>
-<span class="lineno">  605 </span><span class="spaces">            </span><span class="istickedoff">= C.coinToIntegral feeTotal</span>
-<span class="lineno">  606 </span><span class="spaces">            </span><span class="istickedoff">- fromIntegral @Integer (F.sum $ round RoundDown &lt;$&gt; feesUnrounded)</span>
-<span class="lineno">  607 </span><span class="spaces"></span><span class="istickedoff"></span>
-<span class="lineno">  608 </span><span class="spaces">    </span><span class="istickedoff">-- A list of ideal unrounded fee portions, with one fee portion per coin.</span>
-<span class="lineno">  609 </span><span class="spaces">    </span><span class="istickedoff">--</span>
-<span class="lineno">  610 </span><span class="spaces">    </span><span class="istickedoff">-- A coin's ideal fee portion is the rational portion of the total fee that</span>
-<span class="lineno">  611 </span><span class="spaces">    </span><span class="istickedoff">-- corresponds to that coin's relative size when compared to other coins.</span>
-<span class="lineno">  612 </span><span class="spaces">    </span><span class="istickedoff">feesUnrounded :: NonEmpty Rational</span>
-<span class="lineno">  613 </span><span class="spaces">    </span><span class="istickedoff">feesUnrounded = calculateIdealFee &lt;$&gt; coins</span>
-<span class="lineno">  614 </span><span class="spaces">      </span><span class="istickedoff">where</span>
-<span class="lineno">  615 </span><span class="spaces">        </span><span class="istickedoff">calculateIdealFee c</span>
-<span class="lineno">  616 </span><span class="spaces">            </span><span class="istickedoff">= C.coinToIntegral c</span>
-<span class="lineno">  617 </span><span class="spaces">            </span><span class="istickedoff">* C.coinToIntegral feeTotal</span>
-<span class="lineno">  618 </span><span class="spaces">            </span><span class="istickedoff">% C.coinToIntegral totalCoinValue</span>
-<span class="lineno">  619 </span><span class="spaces"></span><span class="istickedoff"></span>
-<span class="lineno">  620 </span><span class="spaces">    </span><span class="istickedoff">-- The total value of all coins.</span>
-<span class="lineno">  621 </span><span class="spaces">    </span><span class="istickedoff">totalCoinValue :: Coin</span>
-<span class="lineno">  622 </span><span class="spaces">    </span><span class="istickedoff">totalCoinValue = F.fold coins</span></span>
-<span class="lineno">  623 </span>
-<span class="lineno">  624 </span>-- | From the given list of coins, remove dust coins with a value less than or
-<span class="lineno">  625 </span>--   equal to the given threshold value, redistributing their total value over
-<span class="lineno">  626 </span>--   the coins that remain.
-<span class="lineno">  627 </span>--
-<span class="lineno">  628 </span>-- This function satisfies the following properties:
-<span class="lineno">  629 </span>--
-<span class="lineno">  630 </span>-- &gt;&gt;&gt; sum coins = sum (coalesceDust threshold coins)
-<span class="lineno">  631 </span>-- &gt;&gt;&gt; all (/= Coin 0) (coalesceDust threshold coins)
-<span class="lineno">  632 </span>--
-<span class="lineno">  633 </span>coalesceDust :: DustThreshold -&gt; NonEmpty Coin -&gt; [Coin]
-<span class="lineno">  634 </span><span class="decl"><span class="istickedoff">coalesceDust threshold coins =</span>
-<span class="lineno">  635 </span><span class="spaces">    </span><span class="istickedoff">splitCoin valueToDistribute coinsToKeep</span>
-<span class="lineno">  636 </span><span class="spaces">  </span><span class="istickedoff">where</span>
-<span class="lineno">  637 </span><span class="spaces">    </span><span class="istickedoff">(coinsToRemove, coinsToKeep) = NE.partition (isDust threshold) coins</span>
-<span class="lineno">  638 </span><span class="spaces">    </span><span class="istickedoff">valueToDistribute = F.fold coinsToRemove</span></span>
-<span class="lineno">  639 </span>
-<span class="lineno">  640 </span>-- Splits up the given coin of value __@v@__, distributing its value over the
-<span class="lineno">  641 </span>-- given coin list of length __@n@__, so that each coin value is increased by
-<span class="lineno">  642 </span>-- an integral amount within unity of __@v/n@__, producing a new list of coin
-<span class="lineno">  643 </span>-- values where the overall total is preserved.
-<span class="lineno">  644 </span>--
-<span class="lineno">  645 </span>-- == Basic Examples
-<span class="lineno">  646 </span>--
-<span class="lineno">  647 </span>-- When it's possible to divide a coin evenly, each coin value is increased by
-<span class="lineno">  648 </span>-- the same integer amount:
-<span class="lineno">  649 </span>--
-<span class="lineno">  650 </span>-- &gt;&gt;&gt; splitCoin (Coin 40) (Coin &lt;$&gt; [1, 1, 1, 1])
-<span class="lineno">  651 </span>-- [Coin 11, Coin 11, Coin 11, Coin 11]
-<span class="lineno">  652 </span>--
-<span class="lineno">  653 </span>-- &gt;&gt;&gt; splitCoin (Coin 40) (Coin &lt;$&gt; [1, 2, 3, 4])
-<span class="lineno">  654 </span>-- [Coin 11, Coin 12, Coin 13, Coin 14]
-<span class="lineno">  655 </span>--
-<span class="lineno">  656 </span>-- == Handling Non-Uniform Increases
-<span class="lineno">  657 </span>--
-<span class="lineno">  658 </span>-- When it's not possible to divide a coin evenly, each integral coin value in
-<span class="lineno">  659 </span>-- the resulting list is always within unity of the ideal unrounded result:
-<span class="lineno">  660 </span>--
-<span class="lineno">  661 </span>-- &gt;&gt;&gt; splitCoin (Coin 2) (Coin &lt;$&gt; [1, 1, 1, 1])
-<span class="lineno">  662 </span>-- [Coin 1, Coin 1, Coin 2, Coin 2]
-<span class="lineno">  663 </span>--
-<span class="lineno">  664 </span>-- &gt;&gt;&gt; splitCoin (Coin 10) (Coin &lt;$&gt; [1, 1, 1, 1])
-<span class="lineno">  665 </span>-- [Coin 3, Coin 3, Coin 4, Coin 4]
-<span class="lineno">  666 </span>--
-<span class="lineno">  667 </span>-- == Handling Empty Lists
-<span class="lineno">  668 </span>--
-<span class="lineno">  669 </span>-- If the given list is empty, this function returns a list with the original
-<span class="lineno">  670 </span>-- given coin as its sole element:
-<span class="lineno">  671 </span>--
-<span class="lineno">  672 </span>-- &gt;&gt;&gt; splitCoin (Coin 10) []
-<span class="lineno">  673 </span>-- [Coin 10]
-<span class="lineno">  674 </span>--
-<span class="lineno">  675 </span>-- == Properties
-<span class="lineno">  676 </span>--
-<span class="lineno">  677 </span>-- The total value is always preserved:
+<span class="lineno">  585 </span><span class="spaces">    </span><span class="istickedoff">-- However, we can't take the simple approach of either rounding /all/ fee</span>
+<span class="lineno">  586 </span><span class="spaces">    </span><span class="istickedoff">-- portions down or rounding /all/ fee portions up, as this could cause the</span>
+<span class="lineno">  587 </span><span class="spaces">    </span><span class="istickedoff">-- sum of fee portions to either undershoot or overshoot the original fee.</span>
+<span class="lineno">  588 </span><span class="spaces">    </span><span class="istickedoff">--</span>
+<span class="lineno">  589 </span><span class="spaces">    </span><span class="istickedoff">-- So in order to hit the fee exactly, we must round /some/ of the portions</span>
+<span class="lineno">  590 </span><span class="spaces">    </span><span class="istickedoff">-- up, and /some/ of the portions down.</span>
+<span class="lineno">  591 </span><span class="spaces">    </span><span class="istickedoff">--</span>
+<span class="lineno">  592 </span><span class="spaces">    </span><span class="istickedoff">-- Fortunately, we can calculate exactly how many fee portions must be</span>
+<span class="lineno">  593 </span><span class="spaces">    </span><span class="istickedoff">-- rounded up, by first rounding /all/ portions down, and then computing</span>
+<span class="lineno">  594 </span><span class="spaces">    </span><span class="istickedoff">-- the /shortfall/ between the sum of the rounded-down portions and the</span>
+<span class="lineno">  595 </span><span class="spaces">    </span><span class="istickedoff">-- original fee.</span>
+<span class="lineno">  596 </span><span class="spaces">    </span><span class="istickedoff">--</span>
+<span class="lineno">  597 </span><span class="spaces">    </span><span class="istickedoff">-- We return a list where all values of 'RoundUp' occur in a contiguous</span>
+<span class="lineno">  598 </span><span class="spaces">    </span><span class="istickedoff">-- section at the start of the list, of the following form:</span>
+<span class="lineno">  599 </span><span class="spaces">    </span><span class="istickedoff">--</span>
+<span class="lineno">  600 </span><span class="spaces">    </span><span class="istickedoff">--     [RoundUp, RoundUp, ..., RoundDown, RoundDown, ...]</span>
+<span class="lineno">  601 </span><span class="spaces">    </span><span class="istickedoff">--</span>
+<span class="lineno">  602 </span><span class="spaces">    </span><span class="istickedoff">feeRoundings :: NonEmpty RoundingDirection</span>
+<span class="lineno">  603 </span><span class="spaces">    </span><span class="istickedoff">feeRoundings =</span>
+<span class="lineno">  604 </span><span class="spaces">        </span><span class="istickedoff">applyN feeShortfall (NE.cons RoundUp) (NE.repeat RoundDown)</span>
+<span class="lineno">  605 </span><span class="spaces">      </span><span class="istickedoff">where</span>
+<span class="lineno">  606 </span><span class="spaces">         </span><span class="istickedoff">-- The part of the total fee that we'd lose if we were to take the</span>
+<span class="lineno">  607 </span><span class="spaces">         </span><span class="istickedoff">-- simple approach of rounding all ideal fee portions /down/.</span>
+<span class="lineno">  608 </span><span class="spaces">        </span><span class="istickedoff">feeShortfall</span>
+<span class="lineno">  609 </span><span class="spaces">            </span><span class="istickedoff">= C.coinToIntegral feeTotal</span>
+<span class="lineno">  610 </span><span class="spaces">            </span><span class="istickedoff">- fromIntegral @Integer (F.sum $ round RoundDown &lt;$&gt; feesUnrounded)</span>
+<span class="lineno">  611 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  612 </span><span class="spaces">    </span><span class="istickedoff">-- A list of ideal unrounded fee portions, with one fee portion per coin.</span>
+<span class="lineno">  613 </span><span class="spaces">    </span><span class="istickedoff">--</span>
+<span class="lineno">  614 </span><span class="spaces">    </span><span class="istickedoff">-- A coin's ideal fee portion is the rational portion of the total fee that</span>
+<span class="lineno">  615 </span><span class="spaces">    </span><span class="istickedoff">-- corresponds to that coin's relative size when compared to other coins.</span>
+<span class="lineno">  616 </span><span class="spaces">    </span><span class="istickedoff">feesUnrounded :: NonEmpty Rational</span>
+<span class="lineno">  617 </span><span class="spaces">    </span><span class="istickedoff">feesUnrounded = calculateIdealFee &lt;$&gt; coins</span>
+<span class="lineno">  618 </span><span class="spaces">      </span><span class="istickedoff">where</span>
+<span class="lineno">  619 </span><span class="spaces">        </span><span class="istickedoff">calculateIdealFee c</span>
+<span class="lineno">  620 </span><span class="spaces">            </span><span class="istickedoff">= C.coinToIntegral c</span>
+<span class="lineno">  621 </span><span class="spaces">            </span><span class="istickedoff">* C.coinToIntegral feeTotal</span>
+<span class="lineno">  622 </span><span class="spaces">            </span><span class="istickedoff">% C.coinToIntegral totalCoinValue</span>
+<span class="lineno">  623 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  624 </span><span class="spaces">    </span><span class="istickedoff">-- The total value of all coins.</span>
+<span class="lineno">  625 </span><span class="spaces">    </span><span class="istickedoff">totalCoinValue :: Coin</span>
+<span class="lineno">  626 </span><span class="spaces">    </span><span class="istickedoff">totalCoinValue = F.fold coins</span></span>
+<span class="lineno">  627 </span>
+<span class="lineno">  628 </span>-- | From the given list of coins, remove dust coins with a value less than or
+<span class="lineno">  629 </span>--   equal to the given threshold value, redistributing their total value over
+<span class="lineno">  630 </span>--   the coins that remain.
+<span class="lineno">  631 </span>--
+<span class="lineno">  632 </span>-- This function satisfies the following properties:
+<span class="lineno">  633 </span>--
+<span class="lineno">  634 </span>-- &gt;&gt;&gt; sum coins = sum (coalesceDust threshold coins)
+<span class="lineno">  635 </span>-- &gt;&gt;&gt; all (/= Coin 0) (coalesceDust threshold coins)
+<span class="lineno">  636 </span>--
+<span class="lineno">  637 </span>coalesceDust :: DustThreshold -&gt; NonEmpty Coin -&gt; [Coin]
+<span class="lineno">  638 </span><span class="decl"><span class="istickedoff">coalesceDust threshold coins =</span>
+<span class="lineno">  639 </span><span class="spaces">    </span><span class="istickedoff">splitCoin valueToDistribute coinsToKeep</span>
+<span class="lineno">  640 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  641 </span><span class="spaces">    </span><span class="istickedoff">(coinsToRemove, coinsToKeep) = NE.partition (isDust threshold) coins</span>
+<span class="lineno">  642 </span><span class="spaces">    </span><span class="istickedoff">valueToDistribute = F.fold coinsToRemove</span></span>
+<span class="lineno">  643 </span>
+<span class="lineno">  644 </span>-- Splits up the given coin of value __@v@__, distributing its value over the
+<span class="lineno">  645 </span>-- given coin list of length __@n@__, so that each coin value is increased by
+<span class="lineno">  646 </span>-- an integral amount within unity of __@v/n@__, producing a new list of coin
+<span class="lineno">  647 </span>-- values where the overall total is preserved.
+<span class="lineno">  648 </span>--
+<span class="lineno">  649 </span>-- == Basic Examples
+<span class="lineno">  650 </span>--
+<span class="lineno">  651 </span>-- When it's possible to divide a coin evenly, each coin value is increased by
+<span class="lineno">  652 </span>-- the same integer amount:
+<span class="lineno">  653 </span>--
+<span class="lineno">  654 </span>-- &gt;&gt;&gt; splitCoin (Coin 40) (Coin &lt;$&gt; [1, 1, 1, 1])
+<span class="lineno">  655 </span>-- [Coin 11, Coin 11, Coin 11, Coin 11]
+<span class="lineno">  656 </span>--
+<span class="lineno">  657 </span>-- &gt;&gt;&gt; splitCoin (Coin 40) (Coin &lt;$&gt; [1, 2, 3, 4])
+<span class="lineno">  658 </span>-- [Coin 11, Coin 12, Coin 13, Coin 14]
+<span class="lineno">  659 </span>--
+<span class="lineno">  660 </span>-- == Handling Non-Uniform Increases
+<span class="lineno">  661 </span>--
+<span class="lineno">  662 </span>-- When it's not possible to divide a coin evenly, each integral coin value in
+<span class="lineno">  663 </span>-- the resulting list is always within unity of the ideal unrounded result:
+<span class="lineno">  664 </span>--
+<span class="lineno">  665 </span>-- &gt;&gt;&gt; splitCoin (Coin 2) (Coin &lt;$&gt; [1, 1, 1, 1])
+<span class="lineno">  666 </span>-- [Coin 1, Coin 1, Coin 2, Coin 2]
+<span class="lineno">  667 </span>--
+<span class="lineno">  668 </span>-- &gt;&gt;&gt; splitCoin (Coin 10) (Coin &lt;$&gt; [1, 1, 1, 1])
+<span class="lineno">  669 </span>-- [Coin 3, Coin 3, Coin 4, Coin 4]
+<span class="lineno">  670 </span>--
+<span class="lineno">  671 </span>-- == Handling Empty Lists
+<span class="lineno">  672 </span>--
+<span class="lineno">  673 </span>-- If the given list is empty, this function returns a list with the original
+<span class="lineno">  674 </span>-- given coin as its sole element:
+<span class="lineno">  675 </span>--
+<span class="lineno">  676 </span>-- &gt;&gt;&gt; splitCoin (Coin 10) []
+<span class="lineno">  677 </span>-- [Coin 10]
 <span class="lineno">  678 </span>--
-<span class="lineno">  679 </span>-- &gt;&gt;&gt; sum (splitCoin x ys) == x + sum ys
+<span class="lineno">  679 </span>-- == Properties
 <span class="lineno">  680 </span>--
-<span class="lineno">  681 </span>splitCoin :: Coin -&gt; [Coin] -&gt; [Coin]
-<span class="lineno">  682 </span><span class="decl"><span class="istickedoff">splitCoin coinToSplit coinsToIncrease =</span>
-<span class="lineno">  683 </span><span class="spaces">    </span><span class="istickedoff">case (mIncrement, mShortfall) of</span>
-<span class="lineno">  684 </span><span class="spaces">        </span><span class="istickedoff">(Just increment, Just shortfall) -&gt;</span>
-<span class="lineno">  685 </span><span class="spaces">            </span><span class="istickedoff">zipWith C.add coinsToIncrease increments</span>
-<span class="lineno">  686 </span><span class="spaces">          </span><span class="istickedoff">where</span>
-<span class="lineno">  687 </span><span class="spaces">            </span><span class="istickedoff">increments = zipWith C.add majorIncrements minorIncrements</span>
-<span class="lineno">  688 </span><span class="spaces">            </span><span class="istickedoff">majorIncrements = repeat increment</span>
-<span class="lineno">  689 </span><span class="spaces">            </span><span class="istickedoff">minorIncrements = replicate (C.coinToIntegral shortfall) C.one</span>
-<span class="lineno">  690 </span><span class="spaces">                </span><span class="istickedoff">&lt;&gt; repeat C.zero</span>
-<span class="lineno">  691 </span><span class="spaces">        </span><span class="istickedoff">_ | coinToSplit &gt; C.zero -&gt;</span>
-<span class="lineno">  692 </span><span class="spaces">            </span><span class="istickedoff">[coinToSplit]</span>
-<span class="lineno">  693 </span><span class="spaces">        </span><span class="istickedoff">_ -&gt;</span>
-<span class="lineno">  694 </span><span class="spaces">            </span><span class="istickedoff">[]</span>
-<span class="lineno">  695 </span><span class="spaces">  </span><span class="istickedoff">where</span>
-<span class="lineno">  696 </span><span class="spaces">    </span><span class="istickedoff">mCoinCount = length coinsToIncrease</span>
-<span class="lineno">  697 </span><span class="spaces">    </span><span class="istickedoff">mIncrement = coinToSplit `C.div` mCoinCount</span>
-<span class="lineno">  698 </span><span class="spaces">    </span><span class="istickedoff">mShortfall = coinToSplit `C.mod` mCoinCount</span></span>
-<span class="lineno">  699 </span>
-<span class="lineno">  700 </span>-- Extract the fractional part of a rational number.
-<span class="lineno">  701 </span>--
-<span class="lineno">  702 </span>-- Examples:
-<span class="lineno">  703 </span>--
-<span class="lineno">  704 </span>-- &gt;&gt;&gt; fractionalPart (3 % 2)
-<span class="lineno">  705 </span>-- 1 % 2
-<span class="lineno">  706 </span>--
-<span class="lineno">  707 </span>-- &gt;&gt;&gt; fractionalPart (11 % 10)
-<span class="lineno">  708 </span>-- 1 % 10
-<span class="lineno">  709 </span>--
-<span class="lineno">  710 </span>fractionalPart :: Rational -&gt; Rational
-<span class="lineno">  711 </span><span class="decl"><span class="istickedoff">fractionalPart = snd . properFraction @_ @Integer</span></span>
-<span class="lineno">  712 </span>
-<span class="lineno">  713 </span>-- Apply the same function multiple times to a value.
-<span class="lineno">  714 </span>--
-<span class="lineno">  715 </span>applyN :: Int -&gt; (a -&gt; a) -&gt; a -&gt; a
-<span class="lineno">  716 </span><span class="decl"><span class="istickedoff">applyN n f = F.foldr (.) id (replicate n f)</span></span>
-<span class="lineno">  717 </span>
-<span class="lineno">  718 </span>-- Find the sum of a list of entries.
-<span class="lineno">  719 </span>--
-<span class="lineno">  720 </span>sumEntries :: [CoinMapEntry i] -&gt; Coin
-<span class="lineno">  721 </span><span class="decl"><span class="istickedoff">sumEntries = F.fold . fmap entryValue</span></span>
-<span class="lineno">  722 </span>
-<span class="lineno">  723 </span>-- | Reduce a coin value by a given fee amount. If fees are too big for
-<span class="lineno">  724 </span>-- a single coin, returns a `Coin 0`.
-<span class="lineno">  725 </span>payFee :: (Fee, Coin) -&gt; Coin
-<span class="lineno">  726 </span><span class="decl"><span class="istickedoff">payFee (Fee f, c) = fromMaybe C.zero (c `C.sub` f)</span></span>
+<span class="lineno">  681 </span>-- The total value is always preserved:
+<span class="lineno">  682 </span>--
+<span class="lineno">  683 </span>-- &gt;&gt;&gt; sum (splitCoin x ys) == x + sum ys
+<span class="lineno">  684 </span>--
+<span class="lineno">  685 </span>splitCoin :: Coin -&gt; [Coin] -&gt; [Coin]
+<span class="lineno">  686 </span><span class="decl"><span class="istickedoff">splitCoin coinToSplit coinsToIncrease =</span>
+<span class="lineno">  687 </span><span class="spaces">    </span><span class="istickedoff">case (mIncrement, mShortfall) of</span>
+<span class="lineno">  688 </span><span class="spaces">        </span><span class="istickedoff">(Just increment, Just shortfall) -&gt;</span>
+<span class="lineno">  689 </span><span class="spaces">            </span><span class="istickedoff">zipWith C.add coinsToIncrease increments</span>
+<span class="lineno">  690 </span><span class="spaces">          </span><span class="istickedoff">where</span>
+<span class="lineno">  691 </span><span class="spaces">            </span><span class="istickedoff">increments = zipWith C.add majorIncrements minorIncrements</span>
+<span class="lineno">  692 </span><span class="spaces">            </span><span class="istickedoff">majorIncrements = repeat increment</span>
+<span class="lineno">  693 </span><span class="spaces">            </span><span class="istickedoff">minorIncrements = replicate (C.coinToIntegral shortfall) C.one</span>
+<span class="lineno">  694 </span><span class="spaces">                </span><span class="istickedoff">&lt;&gt; repeat C.zero</span>
+<span class="lineno">  695 </span><span class="spaces">        </span><span class="istickedoff">_ | coinToSplit &gt; C.zero -&gt;</span>
+<span class="lineno">  696 </span><span class="spaces">            </span><span class="istickedoff">[coinToSplit]</span>
+<span class="lineno">  697 </span><span class="spaces">        </span><span class="istickedoff">_ -&gt;</span>
+<span class="lineno">  698 </span><span class="spaces">            </span><span class="istickedoff">[]</span>
+<span class="lineno">  699 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  700 </span><span class="spaces">    </span><span class="istickedoff">mCoinCount = length coinsToIncrease</span>
+<span class="lineno">  701 </span><span class="spaces">    </span><span class="istickedoff">mIncrement = coinToSplit `C.div` mCoinCount</span>
+<span class="lineno">  702 </span><span class="spaces">    </span><span class="istickedoff">mShortfall = coinToSplit `C.mod` mCoinCount</span></span>
+<span class="lineno">  703 </span>
+<span class="lineno">  704 </span>-- Extract the fractional part of a rational number.
+<span class="lineno">  705 </span>--
+<span class="lineno">  706 </span>-- Examples:
+<span class="lineno">  707 </span>--
+<span class="lineno">  708 </span>-- &gt;&gt;&gt; fractionalPart (3 % 2)
+<span class="lineno">  709 </span>-- 1 % 2
+<span class="lineno">  710 </span>--
+<span class="lineno">  711 </span>-- &gt;&gt;&gt; fractionalPart (11 % 10)
+<span class="lineno">  712 </span>-- 1 % 10
+<span class="lineno">  713 </span>--
+<span class="lineno">  714 </span>fractionalPart :: Rational -&gt; Rational
+<span class="lineno">  715 </span><span class="decl"><span class="istickedoff">fractionalPart = snd . properFraction @_ @Integer</span></span>
+<span class="lineno">  716 </span>
+<span class="lineno">  717 </span>-- Apply the same function multiple times to a value.
+<span class="lineno">  718 </span>--
+<span class="lineno">  719 </span>applyN :: Int -&gt; (a -&gt; a) -&gt; a -&gt; a
+<span class="lineno">  720 </span><span class="decl"><span class="istickedoff">applyN n f = F.foldr (.) id (replicate n f)</span></span>
+<span class="lineno">  721 </span>
+<span class="lineno">  722 </span>-- Find the sum of a list of entries.
+<span class="lineno">  723 </span>--
+<span class="lineno">  724 </span>sumEntries :: [CoinMapEntry i] -&gt; Coin
+<span class="lineno">  725 </span><span class="decl"><span class="istickedoff">sumEntries = F.fold . fmap entryValue</span></span>
+<span class="lineno">  726 </span>
+<span class="lineno">  727 </span>-- | Reduce a coin value by a given fee amount. If fees are too big for
+<span class="lineno">  728 </span>-- a single coin, returns a `Coin 0`.
+<span class="lineno">  729 </span>payFee :: (Fee, Coin) -&gt; Coin
+<span class="lineno">  730 </span><span class="decl"><span class="istickedoff">payFee (Fee f, c) = fromMaybe C.zero (c `C.sub` f)</span></span>
 
 </pre>
 </body>
